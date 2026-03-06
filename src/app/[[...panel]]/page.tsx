@@ -34,6 +34,7 @@ import { OfficePanel } from '@/components/panels/office-panel'
 import { GitHubSyncPanel } from '@/components/panels/github-sync-panel'
 import { DocumentsPanel } from '@/components/panels/documents-panel'
 import { EscalationPanel } from '@/components/panels/escalation-panel'
+import { TerminalPanel } from '@/components/panels/terminal-panel'
 import { ChatPanel } from '@/components/chat/chat-panel'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { LocalModeBanner } from '@/components/layout/local-mode-banner'
@@ -293,6 +294,8 @@ function ContentRouter({ tab }: { tab: string }) {
       return <DocumentsPanel />
     case 'escalations':
       return <EscalationPanel />
+    case 'terminal':
+      return <TerminalPanel />
     case 'super-admin':
       return <SuperAdminPanel />
     case 'workspaces':
