@@ -88,46 +88,61 @@ export default function Home() {
       })
       .catch(() => {})
 
-    // Check capabilities, then conditionally connect to gateway
-    fetch('/api/status?action=capabilities')
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (data?.subscription) {
-          setSubscription(data.subscription)
+    // Auto-connect to primary gateway from DB, falling back to env vars
+    const autoConnect = async () => {
+      // Check capabilities first
+      try {
+        const capRes = await fetch('/api/status?action=capabilities')
+        if (capRes.ok) {
+          const capData = await capRes.json()
+          if (capData?.subscription) setSubscription(capData.subscription)
+          if (capData?.gateway === false) {
+            setDashboardMode('local')
+            setGatewayAvailable(false)
+          } else if (capData?.gateway === true) {
+            setDashboardMode('full')
+            setGatewayAvailable(true)
+          }
         }
-        if (data && data.gateway === false) {
-          setDashboardMode('local')
-          setGatewayAvailable(false)
-          // Skip WebSocket connect — no gateway to talk to
-          return
+      } catch { /* ignore capability check errors */ }
+
+      // Try to auto-connect to primary gateway from DB
+      try {
+        const gwRes = await fetch('/api/gateways')
+        if (gwRes.ok) {
+          const gwData = await gwRes.json()
+          const gateways = gwData?.gateways || []
+          const primary = gateways.find((g: { is_primary: number }) => g.is_primary) || gateways[0]
+          if (primary) {
+            const connRes = await fetch('/api/gateways/connect', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: primary.id }),
+            })
+            if (connRes.ok) {
+              const payload = await connRes.json()
+              const wsUrl = String(payload?.ws_url || '')
+              const token = String(payload?.token || '')
+              if (wsUrl) {
+                setDashboardMode('full')
+                setGatewayAvailable(true)
+                connect(wsUrl, token)
+                return
+              }
+            }
+          }
         }
-        if (data && data.gateway === true) {
-          setDashboardMode('full')
-          setGatewayAvailable(true)
-        }
-        // Connect to gateway WebSocket
-        const wsToken = process.env.NEXT_PUBLIC_GATEWAY_TOKEN || process.env.NEXT_PUBLIC_WS_TOKEN || ''
-        const explicitWsUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || ''
-        const gatewayPort = process.env.NEXT_PUBLIC_GATEWAY_PORT || '18789'
-        const gatewayHost = process.env.NEXT_PUBLIC_GATEWAY_HOST || window.location.hostname
-        const gatewayProto =
-          process.env.NEXT_PUBLIC_GATEWAY_PROTOCOL ||
-          (window.location.protocol === 'https:' ? 'wss' : 'ws')
-        const wsUrl = explicitWsUrl || `${gatewayProto}://${gatewayHost}:${gatewayPort}`
-        connect(wsUrl, wsToken)
-      })
-      .catch(() => {
-        // If capabilities check fails, still try to connect
-        const wsToken = process.env.NEXT_PUBLIC_GATEWAY_TOKEN || process.env.NEXT_PUBLIC_WS_TOKEN || ''
-        const explicitWsUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || ''
-        const gatewayPort = process.env.NEXT_PUBLIC_GATEWAY_PORT || '18789'
-        const gatewayHost = process.env.NEXT_PUBLIC_GATEWAY_HOST || window.location.hostname
-        const gatewayProto =
-          process.env.NEXT_PUBLIC_GATEWAY_PROTOCOL ||
-          (window.location.protocol === 'https:' ? 'wss' : 'ws')
-        const wsUrl = explicitWsUrl || `${gatewayProto}://${gatewayHost}:${gatewayPort}`
-        connect(wsUrl, wsToken)
-      })
+      } catch { /* fall through to env var approach */ }
+
+      // Fallback: connect using env vars
+      const wsToken = process.env.NEXT_PUBLIC_GATEWAY_TOKEN || process.env.NEXT_PUBLIC_WS_TOKEN || ''
+      const explicitWsUrl = process.env.NEXT_PUBLIC_GATEWAY_URL || ''
+      if (explicitWsUrl) {
+        connect(explicitWsUrl, wsToken)
+      }
+      // If no explicit URL and no DB gateway, stay in local mode
+    }
+    autoConnect()
   }, [connect, pathname, router, setCurrentUser, setDashboardMode, setGatewayAvailable, setSubscription, setUpdateAvailable])
 
   if (!isClient) {
