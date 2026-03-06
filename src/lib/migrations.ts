@@ -877,6 +877,32 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_agent_api_keys_revoked_at ON agent_api_keys(revoked_at)
       `)
     }
+  },
+  {
+    id: '028_escalations',
+    up: async (q) => {
+      await execStmts(q, `
+        CREATE TABLE IF NOT EXISTS escalations (
+          id SERIAL PRIMARY KEY,
+          workspace_id INTEGER NOT NULL DEFAULT 1,
+          agent_name TEXT NOT NULL,
+          project TEXT,
+          priority TEXT NOT NULL DEFAULT 'fyi',
+          title TEXT NOT NULL,
+          description TEXT NOT NULL,
+          context TEXT,
+          status TEXT NOT NULL DEFAULT 'open',
+          response TEXT,
+          created_at INTEGER NOT NULL DEFAULT (${unixNow}),
+          responded_at INTEGER,
+          resolved_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_escalations_status ON escalations(status);
+        CREATE INDEX IF NOT EXISTS idx_escalations_priority ON escalations(priority);
+        CREATE INDEX IF NOT EXISTS idx_escalations_workspace_id ON escalations(workspace_id);
+        CREATE INDEX IF NOT EXISTS idx_escalations_created_at ON escalations(created_at)
+      `)
+    }
   }
 ]
 

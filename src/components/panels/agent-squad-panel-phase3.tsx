@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useSmartPoll } from '@/lib/use-smart-poll'
 import { createClientLogger } from '@/lib/client-logger'
 import { AgentAvatar } from '@/components/ui/agent-avatar'
+import { useMissionControl } from '@/store'
 import {
   OverviewTab,
   SoulTab,
@@ -89,6 +90,10 @@ export function AgentSquadPanelPhase3() {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [syncing, setSyncing] = useState(false)
   const [syncToast, setSyncToast] = useState<string | null>(null)
+
+  // Pull live gateway session data
+  const { sessions, connection } = useMissionControl()
+  const sessionByKey = Object.fromEntries(sessions.map(s => [s.key, s]))
 
   // Sync agents from gateway config
   const syncFromConfig = async () => {
@@ -267,6 +272,16 @@ export function AgentSquadPanelPhase3() {
               {agents.filter(hasRecentHeartbeat).length} active heartbeats
             </span>
           </div>
+
+          {/* Gateway live sessions indicator */}
+          {connection.isConnected && sessions.length > 0 && (
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/20">
+              <div className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></div>
+              <span className="text-xs text-amber-400 font-medium">
+                {sessions.filter(s => s.active).length}/{sessions.length} live sessions
+              </span>
+            </div>
+          )}
         </div>
         
         <div className="flex gap-2">
@@ -337,12 +352,17 @@ export function AgentSquadPanelPhase3() {
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {agents.map(agent => (
+            {agents.map(agent => {
+              const liveSession = agent.session_key ? sessionByKey[agent.session_key] : undefined
+              const isLive = liveSession?.active === true
+              const borderColor = isLive
+                ? 'border-amber-400'
+                : hasRecentHeartbeat(agent) ? 'border-cyan-400' : 'border-border'
+
+              return (
               <div
                 key={agent.id}
-                className={`bg-card rounded-lg p-4 border-l-4 hover:bg-surface-1 transition-smooth cursor-pointer ${
-                  hasRecentHeartbeat(agent) ? 'border-cyan-400' : 'border-border'
-                }`}
+                className={`bg-card rounded-lg p-4 border-l-4 hover:bg-surface-1 transition-smooth cursor-pointer ${borderColor}`}
                 onClick={() => setSelectedAgent(agent)}
               >
                 {/* Agent Header */}
@@ -354,8 +374,14 @@ export function AgentSquadPanelPhase3() {
                       <p className="text-muted-foreground text-sm truncate">{agent.role}</p>
                     </div>
                   </div>
-                  
+
                   <div className="flex items-center gap-2">
+                    {/* Live gateway session badge */}
+                    {isLive && (
+                      <span className="px-1.5 py-0.5 text-2xs rounded font-bold bg-amber-500/15 text-amber-300 border border-amber-500/25">
+                        LIVE
+                      </span>
+                    )}
                     {/* Heartbeat indicator */}
                     {hasRecentHeartbeat(agent) && (
                       <div className="w-3 h-3 rounded-full bg-cyan-400 animate-pulse" title="Recent heartbeat"></div>
@@ -365,20 +391,40 @@ export function AgentSquadPanelPhase3() {
                   </div>
                 </div>
 
-                {/* Session Info */}
-                <div className="text-xs text-muted-foreground mb-2">
-                  <div className="flex items-center justify-between">
-                    <span>
-                      <span className="font-medium">Session:</span> {agent.session_key || 'Not set'}
-                    </span>
-                    {agent.session_key && (
-                      <div className="flex items-center gap-1">
-                        <div className="w-2 h-2 rounded-full bg-green-400"></div>
-                        <span>Active</span>
+                {/* Live Session Info from Gateway */}
+                {liveSession ? (
+                  <div className="mb-2 p-2 rounded-md bg-amber-500/5 border border-amber-500/15 text-xs space-y-0.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Model:</span>
+                      <span className="font-mono text-amber-300 text-2xs">{liveSession.model?.split('/').pop() || 'unknown'}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Tokens:</span>
+                      <span className="font-mono text-foreground/80 text-2xs">{liveSession.tokens}</span>
+                    </div>
+                    {liveSession.kind && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Kind:</span>
+                        <span className="text-foreground/80 text-2xs">{liveSession.kind}</span>
                       </div>
                     )}
                   </div>
-                </div>
+                ) : (
+                  /* Session Info (DB) */
+                  <div className="text-xs text-muted-foreground mb-2">
+                    <div className="flex items-center justify-between">
+                      <span>
+                        <span className="font-medium">Session:</span> {agent.session_key || 'Not set'}
+                      </span>
+                      {agent.session_key && connection.isConnected && (
+                        <div className="flex items-center gap-1">
+                          <div className="w-2 h-2 rounded-full bg-muted-foreground/40"></div>
+                          <span className="text-muted-foreground/60">Not live</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Task Stats */}
                 {agent.taskStats && (
@@ -453,7 +499,8 @@ export function AgentSquadPanelPhase3() {
                   </button>
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
       </div>

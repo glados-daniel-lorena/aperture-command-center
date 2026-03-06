@@ -10,6 +10,7 @@ interface NavItem {
   icon: React.ReactNode
   priority: boolean // Show in mobile bottom bar
   requiresGateway?: boolean
+  badge?: number
 }
 
 interface NavGroup {
@@ -23,8 +24,9 @@ const navGroups: NavGroup[] = [
     id: 'core',
     items: [
       { id: 'overview', label: 'Overview', icon: <OverviewIcon />, priority: true },
-      { id: 'agents', label: 'Agents', icon: <AgentsIcon />, priority: true, requiresGateway: true },
+      { id: 'agents', label: 'Agents', icon: <AgentsIcon />, priority: true },
       { id: 'tasks', label: 'Tasks', icon: <TasksIcon />, priority: true },
+      { id: 'escalations', label: 'Escalations', icon: <EscalationsIcon />, priority: true },
       { id: 'sessions', label: 'Sessions', icon: <SessionsIcon />, priority: false },
       { id: 'office', label: 'Office', icon: <OfficeIcon />, priority: false },
       { id: 'documents', label: 'Documents', icon: <DocumentsIcon />, priority: false },
@@ -76,6 +78,23 @@ export function NavRail() {
   const { activeTab, connection, dashboardMode, sidebarExpanded, collapsedGroups, toggleSidebar, toggleGroup } = useMissionControl()
   const navigateToPanel = useNavigateToPanel()
   const isLocal = dashboardMode === 'local'
+  const [openEscalationCount, setOpenEscalationCount] = useState(0)
+
+  // Fetch open escalation count for badge
+  useEffect(() => {
+    const fetchCount = async () => {
+      try {
+        const res = await fetch('/api/escalations?status=open&limit=1')
+        if (res.ok) {
+          const data = await res.json()
+          setOpenEscalationCount(data.openCount ?? 0)
+        }
+      } catch { /* ignore */ }
+    }
+    fetchCount()
+    const interval = setInterval(fetchCount, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   // Keyboard shortcut: [ to toggle sidebar
   useEffect(() => {
@@ -165,10 +184,13 @@ export function NavRail() {
                 <div className={`flex flex-col ${sidebarExpanded ? 'gap-0.5 px-2' : 'items-center gap-1'}`}>
                   {group.items.map((item) => {
                     const disabled = isLocal && item.requiresGateway
+                    const badge = item.id === 'escalations' && openEscalationCount > 0
+                      ? openEscalationCount
+                      : undefined
                     return (
                       <NavButton
                         key={item.id}
-                        item={item}
+                        item={{ ...item, badge }}
                         active={activeTab === item.id}
                         expanded={sidebarExpanded}
                         disabled={disabled}
@@ -232,7 +254,12 @@ function NavButton({ item, active, expanded, disabled, onClick }: {
           <span className="absolute left-0 w-0.5 h-5 bg-primary rounded-r" />
         )}
         <div className="w-5 h-5 shrink-0">{item.icon}</div>
-        <span className="text-sm truncate">{item.label}</span>
+        <span className="text-sm truncate flex-1">{item.label}</span>
+        {item.badge != null && item.badge > 0 && (
+          <span className="inline-flex items-center justify-center min-w-[18px] h-4 px-1 rounded-full text-[10px] font-bold bg-red-500/20 text-red-400 border border-red-500/30">
+            {item.badge > 99 ? '99+' : item.badge}
+          </span>
+        )}
       </button>
     )
   }
@@ -250,6 +277,12 @@ function NavButton({ item, active, expanded, disabled, onClick }: {
       }`}
     >
       <div className="w-5 h-5">{item.icon}</div>
+      {/* Badge for icon-only mode */}
+      {item.badge != null && item.badge > 0 && (
+        <span className="absolute top-1 right-1 min-w-[14px] h-3.5 px-0.5 rounded-full text-[9px] font-bold bg-red-500 text-white flex items-center justify-center">
+          {item.badge > 9 ? '9+' : item.badge}
+        </span>
+      )}
       {/* Tooltip */}
       <span className="absolute left-full ml-2 px-2 py-1 text-xs font-medium bg-popover text-popover-foreground border border-border rounded-md opacity-0 group-hover:opacity-100 pointer-events-none whitespace-nowrap z-50 transition-opacity">
         {tooltipLabel}
@@ -658,6 +691,16 @@ function DocumentsIcon() {
       <path d="M3 1.5h7l3 3V14a1 1 0 01-1 1H3a1 1 0 01-1-1V2.5a1 1 0 011-1z" />
       <path d="M10 1.5V5h3" />
       <path d="M5 8h6M5 10.5h6M5 13h4" />
+    </svg>
+  )
+}
+
+function EscalationsIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M8 2l6 11H2L8 2z" />
+      <path d="M8 6v3" />
+      <circle cx="8" cy="11" r="0.5" fill="currentColor" stroke="none" />
     </svg>
   )
 }
