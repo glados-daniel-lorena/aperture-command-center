@@ -126,9 +126,21 @@ export function EscalationPanel() {
         body: JSON.stringify({ response: response.trim() || undefined, status: newStatus }),
       })
       if (!res.ok) throw new Error('Failed to update')
+      const data = await res.json()
       await fetchEscalations()
-      setExpandedId(null)
       setResponseText(prev => { const n = { ...prev }; delete n[esc.id]; return n })
+      // Show delivery confirmation notice
+      if (data.delivery) {
+        const ok = data.delivery.status === 'delivered'
+        setDeliveryNotice(prev => ({
+          ...prev,
+          [esc.id]: { message: data.delivery.message, ok }
+        }))
+        // Auto-clear after 8 seconds
+        setTimeout(() => {
+          setDeliveryNotice(prev => { const n = { ...prev }; delete n[esc.id]; return n })
+        }, 8000)
+      }
     } catch (err) {
       log.error('Failed to update escalation:', err)
       setError('Failed to update escalation')
@@ -255,6 +267,7 @@ export function EscalationPanel() {
               onRespond={(status) => handleRespond(esc, status)}
               onReopen={() => handleReopen(esc)}
               submitting={submitting === esc.id}
+              deliveryNotice={deliveryNotice[esc.id]}
             />
           ))
         )}
@@ -272,6 +285,7 @@ function EscalationCard({
   onRespond,
   onReopen,
   submitting,
+  deliveryNotice,
 }: {
   escalation: Escalation
   expanded: boolean
@@ -281,6 +295,7 @@ function EscalationCard({
   onRespond: (status: 'responded' | 'resolved') => void
   onReopen: () => void
   submitting: boolean
+  deliveryNotice?: { message: string; ok: boolean }
 }) {
   const p = PRIORITY_CONFIG[esc.priority]
   const s = STATUS_CONFIG[esc.status]
@@ -369,6 +384,27 @@ function EscalationCard({
                   <p className="text-2xs text-muted-foreground mt-1">{formatAge(esc.responded_at)}</p>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Delivery notice */}
+          {deliveryNotice && (
+            <div className={`flex items-start gap-2 px-3 py-2 rounded-md text-xs border ${
+              deliveryNotice.ok
+                ? 'bg-green-500/8 border-green-500/25 text-green-400'
+                : 'bg-amber-500/8 border-amber-500/25 text-amber-400'
+            }`}>
+              {deliveryNotice.ok ? (
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="w-4 h-4 shrink-0 mt-px">
+                  <path d="M3 8l3.5 3.5L13 5" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" className="w-4 h-4 shrink-0 mt-px">
+                  <circle cx="8" cy="8" r="6.5" />
+                  <path d="M8 5v4M8 11v.5" />
+                </svg>
+              )}
+              <span>{deliveryNotice.message}</span>
             </div>
           )}
 
