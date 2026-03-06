@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'crypto'
-import { query } from './postgres'
+import { query, ensureInitialized } from './db'
 import { hashPassword, verifyPassword } from './password'
 
 /**
@@ -117,6 +117,7 @@ export async function createSession(
   userAgent?: string,
   workspaceId?: number
 ): Promise<{ token: string; expiresAt: number }> {
+  await ensureInitialized()
   const token = randomBytes(32).toString('hex')
   const now = Math.floor(Date.now() / 1000)
   const expiresAt = now + SESSION_DURATION
@@ -181,6 +182,7 @@ export async function destroyAllUserSessions(userId: number): Promise<void> {
 }
 
 export async function authenticateUser(username: string, password: string): Promise<User | null> {
+  await ensureInitialized()
   const { rows } = await query<UserQueryRow>('SELECT * FROM users WHERE username = ?', [username])
   const row = rows[0]
   if (!row) return null
