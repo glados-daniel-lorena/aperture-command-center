@@ -948,6 +948,16 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_agents_last_active ON agents(last_active)
       `)
     }
+  },
+  {
+    id: '031_agents_session_key',
+    up: async (q) => {
+      // agents: add session_key for gateway routing (GLA-35)
+      if (!(await columnExists(q, 'agents', 'session_key')))
+        await q(`ALTER TABLE agents ADD COLUMN session_key TEXT`)
+
+      await q(`CREATE INDEX IF NOT EXISTS idx_agents_session_key_v2 ON agents(session_key)`)
+    }
   }
 ]
 

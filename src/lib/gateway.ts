@@ -106,3 +106,31 @@ export function invalidateGatewayCache(): void {
   cachedToken = null
   cacheExpiresAt = 0
 }
+
+/**
+ * GLA-36: Send a message to an OpenClaw session via the gateway.
+ * Uses OPENCLAW_GATEWAY_TOKEN env var for auth (falls back to DB token via gatewaySend).
+ */
+export async function sendToSession(sessionKey: string, message: string): Promise<void> {
+  const baseUrl = await getGatewayUrl()
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN || (await getGatewayToken())
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
+  const res = await fetch(`${baseUrl}/api/sessions/send`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ sessionKey, message }),
+    signal: AbortSignal.timeout(10_000),
+  })
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '')
+    throw new Error(`sendToSession failed: ${res.status} ${text}`)
+  }
+}

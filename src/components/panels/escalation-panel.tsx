@@ -9,6 +9,8 @@ interface Escalation {
   id: number
   workspace_id: number
   agent_name: string
+  agent_id?: string
+  session_key?: string
   project?: string
   priority: 'blocked' | 'question' | 'fyi'
   title: string
@@ -16,6 +18,7 @@ interface Escalation {
   context?: string
   status: 'open' | 'responded' | 'resolved'
   response?: string
+  delivery_status?: 'delivered' | 'cold' | 'no_session'
   created_at: number
   responded_at?: number
   resolved_at?: number
@@ -78,6 +81,8 @@ export function EscalationPanel() {
   const [expandedId, setExpandedId] = useState<number | null>(null)
   const [responseText, setResponseText] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState<number | null>(null)
+  const [deliveryNotice, setDeliveryNotice] = useState<Record<number, { message: string; ok: boolean }>>({})
+
 
   const fetchEscalations = useCallback(async () => {
     try {
