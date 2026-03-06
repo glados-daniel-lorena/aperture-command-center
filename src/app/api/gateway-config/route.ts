@@ -14,7 +14,7 @@ function getConfigPath(): string | null {
  * GET /api/gateway-config - Read the gateway configuration
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const configPath = getConfigPath()
@@ -51,7 +51,7 @@ export async function GET(request: NextRequest) {
  * CRITICAL: Preserves gateway.auth.password and other sensitive fields.
  */
 export async function PUT(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -90,7 +90,7 @@ export async function PUT(request: NextRequest) {
     await writeFile(configPath, JSON.stringify(parsed, null, 2) + '\n')
 
     const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-    logAuditEvent({
+    void logAuditEvent({
       action: 'gateway_config_update',
       actor: auth.user.username,
       actor_id: auth.user.id,

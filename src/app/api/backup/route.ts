@@ -1,20 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { getDatabase, logAuditEvent } from '@/lib/db'
+import { logAuditEvent } from '@/lib/db'
 import { config, ensureDirExists } from '@/lib/config'
 import { join, dirname } from 'path'
 import { readdirSync, statSync, unlinkSync } from 'fs'
 import { heavyLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 
-const BACKUP_DIR = join(dirname(config.dbPath), 'backups')
+const BACKUP_DIR = join(dirname(config.dbPath || '/tmp/mc.db'), 'backups')
 const MAX_BACKUPS = 10
 
 /**
  * GET /api/backup - List existing backups (admin only)
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   ensureDirExists(BACKUP_DIR)
@@ -39,57 +39,26 @@ export async function GET(request: NextRequest) {
 }
 
 /**
- * POST /api/backup - Create a new backup (admin only)
+ * POST /api/backup - Not supported with Postgres (admin only)
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = heavyLimiter(request)
   if (rateCheck) return rateCheck
 
-  ensureDirExists(BACKUP_DIR)
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
-  const backupPath = join(BACKUP_DIR, `mc-backup-${timestamp}.db`)
-
-  try {
-    const db = getDatabase()
-    await db.backup(backupPath)
-
-    const stat = statSync(backupPath)
-
-    const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-    logAuditEvent({
-      action: 'backup_create',
-      actor: auth.user.username,
-      actor_id: auth.user.id,
-      detail: { path: backupPath, size: stat.size },
-      ip_address: ipAddress,
-    })
-
-    // Prune old backups beyond MAX_BACKUPS
-    pruneOldBackups()
-
-    return NextResponse.json({
-      success: true,
-      backup: {
-        name: `mc-backup-${timestamp}.db`,
-        size: stat.size,
-        created_at: Math.floor(stat.mtimeMs / 1000),
-      },
-    })
-  } catch (error: any) {
-    logger.error({ err: error }, 'Backup failed')
-    return NextResponse.json({ error: `Backup failed: ${error.message}` }, { status: 500 })
-  }
+  return NextResponse.json(
+    { error: 'Database backups are not supported with Postgres. Use your Neon dashboard to manage backups.' },
+    { status: 501 }
+  )
 }
 
 /**
  * DELETE /api/backup?name=<filename> - Delete a specific backup (admin only)
  */
 export async function DELETE(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   let body: any

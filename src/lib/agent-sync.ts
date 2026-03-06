@@ -6,7 +6,8 @@
  */
 
 import { config } from './config'
-import { getDatabase, db_helpers, logAuditEvent } from './db'
+import { query } from './postgres'
+import { logAuditEvent } from './db'
 import { eventBus } from './event-bus'
 import { join, isAbsolute, resolve } from 'path'
 import { existsSync, readFileSync } from 'fs'
@@ -139,7 +140,6 @@ function resolveAgentWorkspacePath(workspace: string): string {
   return resolveWithin(config.openclawStateDir, workspace)
 }
 
-/** Safely read a file from an agent's workspace directory */
 function readWorkspaceFile(workspace: string | undefined, filename: string): string | null {
   if (!workspace) return null
   try {
@@ -178,7 +178,6 @@ export function enrichAgentConfigFromWorkspace(configData: any): any {
   }
 }
 
-/** Read and parse openclaw.json agents list */
 async function readOpenClawAgents(): Promise<OpenClawAgent[]> {
   const configPath = getConfigPath()
   if (!configPath) throw new Error('OPENCLAW_CONFIG_PATH not configured')
@@ -189,7 +188,6 @@ async function readOpenClawAgents(): Promise<OpenClawAgent[]> {
   return parsed?.agents?.list || []
 }
 
-/** Extract MC-friendly fields from an OpenClaw agent config */
 function mapAgentToMC(agent: OpenClawAgent): {
   name: string
   role: string
@@ -198,7 +196,6 @@ function mapAgentToMC(agent: OpenClawAgent): {
 } {
   const name = agent.identity?.name || agent.name || agent.id
   const role = agent.identity?.theme || 'agent'
-  // Store the full config minus systemPrompt/soul (which can be large)
   const configData = enrichAgentConfigFromWorkspace({
     openclawId: agent.id,
     model: agent.model,
@@ -212,13 +209,11 @@ function mapAgentToMC(agent: OpenClawAgent): {
     isDefault: agent.default || false,
   })
 
-  // Read soul.md from the agent's workspace if available
   const soul_content = readWorkspaceFile(agent.workspace, 'soul.md')
 
   return { name, role, config: configData, soul_content }
 }
 
-/** Sync agents from openclaw.json into the MC database */
 export async function syncAgentsFromConfig(actor: string = 'system'): Promise<SyncResult> {
   let agents: OpenClawAgent[]
   try {
@@ -231,62 +226,58 @@ export async function syncAgentsFromConfig(actor: string = 'system'): Promise<Sy
     return { synced: 0, created: 0, updated: 0, agents: [] }
   }
 
-  const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   let created = 0
   let updated = 0
   const results: SyncResult['agents'] = []
 
-  const findByName = db.prepare('SELECT id, name, role, config, soul_content FROM agents WHERE name = ?')
-  const insertAgent = db.prepare(`
-    INSERT INTO agents (name, role, soul_content, status, created_at, updated_at, config)
-    VALUES (?, ?, ?, 'offline', ?, ?, ?)
-  `)
-  const updateAgent = db.prepare(`
-    UPDATE agents SET role = ?, config = ?, soul_content = ?, updated_at = ? WHERE name = ?
-  `)
+  for (const agent of agents) {
+    const mapped = mapAgentToMC(agent)
+    const configJson = JSON.stringify(mapped.config)
 
-  db.transaction(() => {
-    for (const agent of agents) {
-      const mapped = mapAgentToMC(agent)
-      const configJson = JSON.stringify(mapped.config)
-      const existing = findByName.get(mapped.name) as any
+    const { rows: existingRows } = await query<{ id: number; name: string; role: string; config: string; soul_content: string | null }>(
+      'SELECT id, name, role, config, soul_content FROM agents WHERE name = ?',
+      [mapped.name]
+    )
+    const existing = existingRows[0]
 
-      if (existing) {
-        // Check if config or soul_content actually changed
-        const existingConfig = existing.config || '{}'
-        const existingSoul = existing.soul_content || null
-        const configChanged = existingConfig !== configJson || existing.role !== mapped.role
-        const soulChanged = mapped.soul_content !== null && mapped.soul_content !== existingSoul
+    if (existing) {
+      const existingConfig = existing.config || '{}'
+      const existingSoul = existing.soul_content || null
+      const configChanged = existingConfig !== configJson || existing.role !== mapped.role
+      const soulChanged = mapped.soul_content !== null && mapped.soul_content !== existingSoul
 
-        if (configChanged || soulChanged) {
-          // Only overwrite soul_content if we read a new value from workspace
-          const soulToWrite = mapped.soul_content ?? existingSoul
-          updateAgent.run(mapped.role, configJson, soulToWrite, now, mapped.name)
-          results.push({ id: agent.id, name: mapped.name, action: 'updated' })
-          updated++
-        } else {
-          results.push({ id: agent.id, name: mapped.name, action: 'unchanged' })
-        }
+      if (configChanged || soulChanged) {
+        const soulToWrite = mapped.soul_content ?? existingSoul
+        await query(
+          `UPDATE agents SET role = ?, config = ?, soul_content = ?, updated_at = ? WHERE name = ?`,
+          [mapped.role, configJson, soulToWrite, now, mapped.name]
+        )
+        results.push({ id: agent.id, name: mapped.name, action: 'updated' })
+        updated++
       } else {
-        insertAgent.run(mapped.name, mapped.role, mapped.soul_content, now, now, configJson)
-        results.push({ id: agent.id, name: mapped.name, action: 'created' })
-        created++
+        results.push({ id: agent.id, name: mapped.name, action: 'unchanged' })
       }
+    } else {
+      await query(
+        `INSERT INTO agents (name, role, soul_content, status, created_at, updated_at, config)
+         VALUES (?, ?, ?, 'offline', ?, ?, ?)`,
+        [mapped.name, mapped.role, mapped.soul_content, now, now, configJson]
+      )
+      results.push({ id: agent.id, name: mapped.name, action: 'created' })
+      created++
     }
-  })()
+  }
 
   const synced = agents.length
 
-  // Log audit event
   if (created > 0 || updated > 0) {
-    logAuditEvent({
+    void logAuditEvent({
       action: 'agent_config_sync',
       actor,
       detail: { synced, created, updated, agents: results.filter(a => a.action !== 'unchanged').map(a => a.name) },
     })
 
-    // Broadcast sync event
     eventBus.broadcast('agent.created', { type: 'sync', synced, created, updated })
   }
 
@@ -294,7 +285,6 @@ export async function syncAgentsFromConfig(actor: string = 'system'): Promise<Sy
   return { synced, created, updated, agents: results }
 }
 
-/** Preview the diff between openclaw.json and MC database without writing */
 export async function previewSyncDiff(): Promise<SyncDiff> {
   let agents: OpenClawAgent[]
   try {
@@ -303,8 +293,9 @@ export async function previewSyncDiff(): Promise<SyncDiff> {
     return { inConfig: 0, inMC: 0, newAgents: [], updatedAgents: [], onlyInMC: [] }
   }
 
-  const db = getDatabase()
-  const allMCAgents = db.prepare('SELECT name, role, config FROM agents').all() as Array<{ name: string; role: string; config: string }>
+  const { rows: allMCAgents } = await query<{ name: string; role: string; config: string }>(
+    'SELECT name, role, config FROM agents'
+  )
   const mcNames = new Set(allMCAgents.map(a => a.name))
 
   const newAgents: string[] = []
@@ -339,7 +330,6 @@ export async function previewSyncDiff(): Promise<SyncDiff> {
   }
 }
 
-/** Write an agent config back to openclaw.json agents.list */
 export async function writeAgentToConfig(agentConfig: any): Promise<void> {
   const configPath = getConfigPath()
   if (!configPath) throw new Error('OPENCLAW_CONFIG_PATH not configured')
@@ -351,10 +341,8 @@ export async function writeAgentToConfig(agentConfig: any): Promise<void> {
   if (!parsed.agents) parsed.agents = {}
   if (!parsed.agents.list) parsed.agents.list = []
 
-  // Find existing by id
   const idx = parsed.agents.list.findIndex((a: any) => a.id === agentConfig.id)
   if (idx >= 0) {
-    // Deep merge: preserve fields not in update
     parsed.agents.list[idx] = deepMerge(parsed.agents.list[idx], agentConfig)
   } else {
     parsed.agents.list.push(agentConfig)
@@ -363,7 +351,6 @@ export async function writeAgentToConfig(agentConfig: any): Promise<void> {
   await writeFile(configPath, JSON.stringify(parsed, null, 2) + '\n')
 }
 
-/** Deep merge two objects (target <- source), preserving target fields not in source */
 function deepMerge(target: any, source: any): any {
   const result = { ...target }
   for (const key of Object.keys(source)) {

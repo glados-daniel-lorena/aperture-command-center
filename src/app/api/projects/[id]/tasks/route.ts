@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
@@ -12,11 +12,10 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
     const { id } = await params
     const projectId = Number.parseInt(id, 10)
@@ -24,20 +23,20 @@ export async function GET(
       return NextResponse.json({ error: 'Invalid project ID' }, { status: 400 })
     }
 
-    const project = db.prepare(`
+    const project = (await query(`
       SELECT id, workspace_id, name, slug, description, ticket_prefix, ticket_counter, status, created_at, updated_at
       FROM projects
       WHERE id = ? AND workspace_id = ?
-    `).get(projectId, workspaceId)
+    `, [projectId, workspaceId])).rows[0]
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
-    const tasks = db.prepare(`
+    const tasks = (await query(`
       SELECT t.*, p.name as project_name, p.ticket_prefix as project_prefix
       FROM tasks t
       LEFT JOIN projects p ON p.id = t.project_id AND p.workspace_id = t.workspace_id
       WHERE t.workspace_id = ? AND t.project_id = ?
       ORDER BY t.created_at DESC
-    `).all(workspaceId, projectId)
+    `, [workspaceId, projectId])).rows
 
     return NextResponse.json({
       project,

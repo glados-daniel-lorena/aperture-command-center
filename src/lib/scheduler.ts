@@ -1,4 +1,5 @@
-import { getDatabase, logAuditEvent } from './db'
+import { logAuditEvent } from './db'
+import { query } from './postgres'
 import { syncAgentsFromConfig } from './agent-sync'
 import { config, ensureDirExists } from './config'
 import { join, dirname } from 'path'
@@ -23,73 +24,34 @@ interface ScheduledTask {
 const tasks: Map<string, ScheduledTask> = new Map()
 let tickInterval: ReturnType<typeof setInterval> | null = null
 
-/** Check if a setting is enabled (reads from settings table, falls back to default) */
-function isSettingEnabled(key: string, defaultValue: boolean): boolean {
+async function isSettingEnabled(key: string, defaultValue: boolean): Promise<boolean> {
   try {
-    const db = getDatabase()
-    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
-    if (row) return row.value === 'true'
+    const { rows } = await query<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key])
+    if (rows[0]) return rows[0].value === 'true'
     return defaultValue
   } catch {
     return defaultValue
   }
 }
 
-function getSettingNumber(key: string, defaultValue: number): number {
+async function getSettingNumber(key: string, defaultValue: number): Promise<number> {
   try {
-    const db = getDatabase()
-    const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
-    if (row) return parseInt(row.value) || defaultValue
+    const { rows } = await query<{ value: string }>('SELECT value FROM settings WHERE key = ?', [key])
+    if (rows[0]) return parseInt(rows[0].value) || defaultValue
     return defaultValue
   } catch {
     return defaultValue
   }
 }
 
-/** Run a database backup */
+/** Run a database backup (not supported with Neon Postgres — use Neon's built-in backups) */
 async function runBackup(): Promise<{ ok: boolean; message: string }> {
-  ensureDirExists(BACKUP_DIR)
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19)
-  const backupPath = join(BACKUP_DIR, `mc-backup-${timestamp}.db`)
-
-  try {
-    const db = getDatabase()
-    await db.backup(backupPath)
-
-    const stat = statSync(backupPath)
-    logAuditEvent({
-      action: 'auto_backup',
-      actor: 'scheduler',
-      detail: { path: backupPath, size: stat.size },
-    })
-
-    // Prune old backups
-    const maxBackups = getSettingNumber('general.backup_retention_count', 10)
-    try {
-      const files = readdirSync(BACKUP_DIR)
-        .filter(f => f.startsWith('mc-backup-') && f.endsWith('.db'))
-        .map(f => ({ name: f, mtime: statSync(join(BACKUP_DIR, f)).mtimeMs }))
-        .sort((a, b) => b.mtime - a.mtime)
-
-      for (const file of files.slice(maxBackups)) {
-        unlinkSync(join(BACKUP_DIR, file.name))
-      }
-    } catch {
-      // Best-effort pruning
-    }
-
-    const sizeKB = Math.round(stat.size / 1024)
-    return { ok: true, message: `Backup created (${sizeKB}KB)` }
-  } catch (err: any) {
-    return { ok: false, message: `Backup failed: ${err.message}` }
-  }
+  return { ok: true, message: 'Database backups are managed by Neon Postgres' }
 }
 
 /** Run data cleanup based on retention settings */
 async function runCleanup(): Promise<{ ok: boolean; message: string }> {
   try {
-    const db = getDatabase()
     const now = Math.floor(Date.now() / 1000)
     const ret = config.retention
     let totalDeleted = 0
@@ -105,8 +67,8 @@ async function runCleanup(): Promise<{ ok: boolean; message: string }> {
       if (days <= 0) continue
       const cutoff = now - days * 86400
       try {
-        const res = db.prepare(`DELETE FROM ${table} WHERE ${column} < ?`).run(cutoff)
-        totalDeleted += res.changes
+        const { rowCount } = await query(`DELETE FROM ${table} WHERE ${column} < ?`, [cutoff])
+        totalDeleted += rowCount
       } catch {
         // Table might not exist
       }
@@ -137,7 +99,7 @@ async function runCleanup(): Promise<{ ok: boolean; message: string }> {
     }
 
     if (totalDeleted > 0) {
-      logAuditEvent({
+      void logAuditEvent({
         action: 'auto_cleanup',
         actor: 'scheduler',
         detail: { total_deleted: totalDeleted },
@@ -153,50 +115,44 @@ async function runCleanup(): Promise<{ ok: boolean; message: string }> {
 /** Check agent liveness - mark agents offline if not seen recently */
 async function runHeartbeatCheck(): Promise<{ ok: boolean; message: string }> {
   try {
-    const db = getDatabase()
     const now = Math.floor(Date.now() / 1000)
-    const timeoutMinutes = getSettingNumber('general.agent_timeout_minutes', 10)
+    const timeoutMinutes = await getSettingNumber('general.agent_timeout_minutes', 10)
     const threshold = now - timeoutMinutes * 60
 
-    // Find agents that are not offline but haven't been seen recently
-    const staleAgents = db.prepare(`
-      SELECT id, name, status, last_seen FROM agents
-      WHERE status != 'offline' AND (last_seen IS NULL OR last_seen < ?)
-    `).all(threshold) as Array<{ id: number; name: string; status: string; last_seen: number | null }>
+    const { rows: staleAgents } = await query<{ id: number; name: string; status: string; last_seen: number | null }>(
+      `SELECT id, name, status, last_seen FROM agents
+       WHERE status != 'offline' AND (last_seen IS NULL OR last_seen < ?)`,
+      [threshold]
+    )
 
     if (staleAgents.length === 0) {
       return { ok: true, message: 'All agents healthy' }
     }
 
-    // Mark stale agents as offline
-    const markOffline = db.prepare('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?')
-    const logActivity = db.prepare(`
-      INSERT INTO activities (type, entity_type, entity_id, actor, description)
-      VALUES ('agent_status_change', 'agent', ?, 'heartbeat', ?)
-    `)
-
     const names: string[] = []
-    db.transaction(() => {
-      for (const agent of staleAgents) {
-        markOffline.run('offline', now, agent.id)
-        logActivity.run(agent.id, `Agent "${agent.name}" marked offline (no heartbeat for ${timeoutMinutes}m)`)
-        names.push(agent.name)
+    for (const agent of staleAgents) {
+      await query('UPDATE agents SET status = ?, updated_at = ? WHERE id = ?', ['offline', now, agent.id])
+      await query(
+        `INSERT INTO activities (type, entity_type, entity_id, actor, description)
+         VALUES ('agent_status_change', 'agent', ?, 'heartbeat', ?)`,
+        [agent.id, `Agent "${agent.name}" marked offline (no heartbeat for ${timeoutMinutes}m)`]
+      )
+      names.push(agent.name)
 
-        // Create notification for each stale agent
-        try {
-          db.prepare(`
-            INSERT INTO notifications (recipient, type, title, message, source_type, source_id)
-            VALUES ('system', 'heartbeat', ?, ?, 'agent', ?)
-          `).run(
+      try {
+        await query(
+          `INSERT INTO notifications (recipient, type, title, message, source_type, source_id)
+           VALUES ('system', 'heartbeat', ?, ?, 'agent', ?)`,
+          [
             `Agent offline: ${agent.name}`,
             `Agent "${agent.name}" was marked offline after ${timeoutMinutes} minutes without heartbeat`,
-            agent.id
-          )
-        } catch { /* notification creation failed */ }
-      }
-    })()
+            agent.id,
+          ]
+        )
+      } catch { /* notification creation failed */ }
+    }
 
-    logAuditEvent({
+    void logAuditEvent({
       action: 'heartbeat_check',
       actor: 'scheduler',
       detail: { marked_offline: names },
@@ -302,7 +258,7 @@ async function tick() {
       : id === 'claude_session_scan' ? 'general.claude_session_scan'
       : 'general.agent_heartbeat'
     const defaultEnabled = id === 'agent_heartbeat' || id === 'webhook_retry' || id === 'claude_session_scan'
-    if (!isSettingEnabled(settingKey, defaultEnabled)) continue
+    if (!(await isSettingEnabled(settingKey, defaultEnabled))) continue
 
     task.running = true
     try {
@@ -323,7 +279,7 @@ async function tick() {
 }
 
 /** Get scheduler status (for API) */
-export function getSchedulerStatus() {
+export async function getSchedulerStatus() {
   const result: Array<{
     id: string
     name: string
@@ -344,7 +300,7 @@ export function getSchedulerStatus() {
     result.push({
       id,
       name: task.name,
-      enabled: isSettingEnabled(settingKey, defaultEnabled),
+      enabled: await isSettingEnabled(settingKey, defaultEnabled),
       lastRun: task.lastRun,
       nextRun: task.nextRun,
       running: task.running,

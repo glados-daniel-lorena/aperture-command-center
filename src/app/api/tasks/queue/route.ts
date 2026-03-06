@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
@@ -42,11 +42,10 @@ function priorityRankSql() {
  * - max_capacity: optional integer 1..20 (default 1)
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id
     const { searchParams } = new URL(request.url)
 
@@ -69,13 +68,13 @@ export async function GET(request: NextRequest) {
 
     const now = Math.floor(Date.now() / 1000)
 
-    const currentTask = db.prepare(`
+    const currentTask = (await query(`
       SELECT *
       FROM tasks
       WHERE workspace_id = ? AND assigned_to = ? AND status = 'in_progress'
       ORDER BY updated_at DESC
       LIMIT 1
-    `).get(workspaceId, agent) as any | undefined
+    `, [workspaceId, agent])).rows[0] as any | undefined
 
     if (currentTask) {
       return NextResponse.json({
@@ -86,11 +85,11 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    const inProgressCount = (db.prepare(`
+    const inProgressCount = ((await query(`
       SELECT COUNT(*) as c
       FROM tasks
       WHERE workspace_id = ? AND assigned_to = ? AND status = 'in_progress'
-    `).get(workspaceId, agent) as { c: number }).c
+    `, [workspaceId, agent])).rows[0] as { c: number }).c
 
     if (inProgressCount >= maxCapacity) {
       return NextResponse.json({
@@ -103,7 +102,7 @@ export async function GET(request: NextRequest) {
 
     // Best-effort atomic pickup loop for race safety.
     for (let attempt = 0; attempt < 5; attempt += 1) {
-      const candidate = db.prepare(`
+      const candidate = (await query(`
         SELECT *
         FROM tasks
         WHERE workspace_id = ?
@@ -111,20 +110,20 @@ export async function GET(request: NextRequest) {
           AND (assigned_to IS NULL OR assigned_to = ?)
         ORDER BY ${priorityRankSql()} ASC, due_date ASC NULLS LAST, created_at ASC
         LIMIT 1
-      `).get(workspaceId, agent) as any | undefined
+      `, [workspaceId, agent])).rows[0] as any | undefined
 
       if (!candidate) break
 
-      const claimed = db.prepare(`
+      const claimed = await query(`
         UPDATE tasks
         SET status = 'in_progress', assigned_to = ?, updated_at = ?
         WHERE id = ? AND workspace_id = ?
           AND status IN ('assigned', 'inbox')
           AND (assigned_to IS NULL OR assigned_to = ?)
-      `).run(agent, now, candidate.id, workspaceId, agent)
+      `, [agent, now, candidate.id, workspaceId, agent])
 
-      if (claimed.changes > 0) {
-        const task = db.prepare('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?').get(candidate.id, workspaceId) as any
+      if ((claimed.rowCount ?? 0) > 0) {
+        const task = (await query('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?', [candidate.id, workspaceId])).rows[0] as any
         return NextResponse.json({
           task: mapTaskRow(task),
           reason: 'assigned' as QueueReason,

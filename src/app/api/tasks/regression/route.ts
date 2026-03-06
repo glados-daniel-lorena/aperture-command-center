@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
 import { readLimiter } from '@/lib/rate-limit'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { logger } from '@/lib/logger'
 
 interface RegressionTaskRow {
@@ -108,7 +108,7 @@ function buildWindowStats(
 }
 
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = readLimiter(request)
@@ -132,15 +132,13 @@ export async function GET(request: NextRequest) {
     const lookbackSeconds = Math.min(maxLookbackSeconds, Math.max(60, Math.floor(Number.isFinite(lookbackSecondsRaw) ? lookbackSecondsRaw : 7 * 24 * 60 * 60)))
 
     const postStart = betaStart
-    // Include tasks completed in the current second.
     const postEnd = now + 1
     const postDuration = Math.max(60, postEnd - postStart)
     const baselineDuration = Math.min(lookbackSeconds, postDuration)
     const baselineEnd = betaStart
     const baselineStart = Math.max(0, baselineEnd - baselineDuration)
 
-    const db = getDatabase()
-    const rows = db.prepare(`
+    const rows = (await query(`
       SELECT
         id,
         created_at,
@@ -154,7 +152,7 @@ export async function GET(request: NextRequest) {
         AND completed_at IS NOT NULL
         AND completed_at >= ?
         AND completed_at < ?
-    `).all(workspaceId, baselineStart, postEnd) as RegressionTaskRow[]
+    `, [workspaceId, baselineStart, postEnd])).rows as RegressionTaskRow[]
 
     const baseline = buildWindowStats('baseline', baselineStart, baselineEnd, rows)
     const post = buildWindowStats('post', postStart, postEnd, rows)

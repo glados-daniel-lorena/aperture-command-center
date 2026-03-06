@@ -2,22 +2,20 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getAllGatewaySessions } from '@/lib/sessions'
 import { syncClaudeSessions } from '@/lib/claude-sessions'
 import { scanCodexSessions } from '@/lib/codex-sessions'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
     const gatewaySessions = getAllGatewaySessions()
 
-    // If gateway sessions exist, deduplicate and return those
     if (gatewaySessions.length > 0) {
       // Deduplicate by sessionId — OpenClaw tracks cron runs under the same
       // session ID as the parent session, causing duplicate React keys (#80).
-      // Keep the most recently updated entry when duplicates exist.
       const sessionMap = new Map<string, (typeof gatewaySessions)[0]>()
       for (const s of gatewaySessions) {
         const id = s.sessionId || `${s.agent}:${s.key}`
@@ -50,9 +48,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ sessions })
     }
 
-    // Fallback: sync and read local Claude + Codex sessions from disk/SQLite
+    // Fallback: sync and read local Claude + Codex sessions from disk/DB
     await syncClaudeSessions()
-    const claudeSessions = getLocalClaudeSessions()
+    const claudeSessions = await getLocalClaudeSessions()
     const codexSessions = getLocalCodexSessions()
     const merged = mergeLocalSessions(claudeSessions, codexSessions)
     return NextResponse.json({ sessions: merged })
@@ -62,16 +60,15 @@ export async function GET(request: NextRequest) {
   }
 }
 
-/** Read Claude Code sessions from the local SQLite database */
-function getLocalClaudeSessions() {
+/** Read Claude Code sessions from the database */
+async function getLocalClaudeSessions() {
   try {
-    const db = getDatabase()
-    const rows = db.prepare(
-      'SELECT * FROM claude_sessions ORDER BY last_message_at DESC LIMIT 50'
-    ).all() as Array<Record<string, any>>
+    const rows = (await query(
+      'SELECT * FROM claude_sessions ORDER BY last_message_at DESC LIMIT 50',
+      []
+    )).rows as Array<Record<string, any>>
 
     return rows.map((s) => {
-      const total = (s.input_tokens || 0) + (s.output_tokens || 0)
       const lastMsg = s.last_message_at ? new Date(s.last_message_at).getTime() : 0
       return {
         id: s.session_id,

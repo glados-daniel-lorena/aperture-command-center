@@ -19,13 +19,13 @@ export async function POST(request: Request) {
     const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
     const userAgent = request.headers.get('user-agent') || undefined
 
-    const user = authenticateUser(username, password)
+    const user = await authenticateUser(username, password)
     if (!user) {
       logAuditEvent({ action: 'login_failed', actor: username, ip_address: ipAddress, user_agent: userAgent })
       return NextResponse.json({ error: 'Invalid credentials' }, { status: 401 })
     }
 
-    const { token, expiresAt } = createSession(user.id, ipAddress, userAgent, user.workspace_id)
+    const { token, expiresAt } = await createSession(user.id, ipAddress, userAgent, user.workspace_id)
 
     logAuditEvent({ action: 'login', actor: user.username, actor_id: user.id, ip_address: ipAddress, user_agent: userAgent })
 

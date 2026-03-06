@@ -9,15 +9,15 @@ import { logger } from '@/lib/logger'
  * GET /api/auth/users - List all users (admin only)
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-  const user = getUserFromRequest(request)
+  const user = await getUserFromRequest(request)
   if (!user || user.role !== 'admin') {
     return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
   }
 
-  const users = getAllUsers()
+  const users = await getAllUsers()
   const workspaceId = user.workspace_id ?? 1
   return NextResponse.json({ users: users.filter((u) => (u.workspace_id ?? 1) === workspaceId) })
 }
@@ -26,7 +26,7 @@ export async function GET(request: NextRequest) {
  * POST /api/auth/users - Create a new user (admin only)
  */
 export async function POST(request: NextRequest) {
-  const currentUser = getUserFromRequest(request)
+  const currentUser = await getUserFromRequest(request)
   if (!currentUser || currentUser.role !== 'admin') {
     return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
   }
@@ -40,14 +40,14 @@ export async function POST(request: NextRequest) {
     const { username, password, display_name, role, provider, email } = result.data
 
     const workspaceId = currentUser.workspace_id ?? 1
-    const newUser = createUser(username, password, display_name || username, role, {
+    const newUser = await createUser(username, password, display_name || username, role, {
       provider,
       email: email || null,
       workspace_id: workspaceId,
     })
 
     const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-    logAuditEvent({
+    void logAuditEvent({
       action: 'user_create', actor: currentUser.username, actor_id: currentUser.id,
       target_type: 'user', target_id: newUser.id,
       detail: { username, role, provider, email }, ip_address: ipAddress,
@@ -67,7 +67,7 @@ export async function POST(request: NextRequest) {
       }
     }, { status: 201 })
   } catch (error: any) {
-    if (error.message?.includes('UNIQUE constraint failed')) {
+    if (error.message?.toLowerCase().includes('unique')) {
       return NextResponse.json({ error: 'Username already exists' }, { status: 409 })
     }
     logger.error({ err: error }, 'POST /api/auth/users error')
@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
  * PUT /api/auth/users - Update a user (admin only)
  */
 export async function PUT(request: NextRequest) {
-  const currentUser = getUserFromRequest(request)
+  const currentUser = await getUserFromRequest(request)
   if (!currentUser || currentUser.role !== 'admin') {
     return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
   }
@@ -96,24 +96,23 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: 'Invalid role' }, { status: 400 })
     }
 
-    // Prevent demoting yourself
     if (userId === currentUser.id && role && role !== currentUser.role) {
       return NextResponse.json({ error: 'Cannot change your own role' }, { status: 400 })
     }
 
     const workspaceId = currentUser.workspace_id ?? 1
-    const existing = getUserById(userId)
+    const existing = await getUserById(userId)
     if (!existing || (existing.workspace_id ?? 1) !== workspaceId) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 })
     }
 
-    const updated = updateUser(userId, { display_name, role, password: password || undefined, is_approved, email, avatar_url })
+    const updated = await updateUser(userId, { display_name, role, password: password || undefined, is_approved, email, avatar_url })
     if (!updated) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 })
     }
 
     const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-    logAuditEvent({
+    void logAuditEvent({
       action: 'user_update', actor: currentUser.username, actor_id: currentUser.id,
       target_type: 'user', target_id: userId,
       detail: { display_name, role, password_changed: !!password, is_approved }, ip_address: ipAddress,
@@ -142,7 +141,7 @@ export async function PUT(request: NextRequest) {
  * DELETE /api/auth/users - Delete a user (admin only)
  */
 export async function DELETE(request: NextRequest) {
-  const currentUser = getUserFromRequest(request)
+  const currentUser = await getUserFromRequest(request)
   if (!currentUser || currentUser.role !== 'admin') {
     return NextResponse.json({ error: 'Admin access required' }, { status: 403 })
   }
@@ -157,24 +156,23 @@ export async function DELETE(request: NextRequest) {
 
   const userId = parseInt(id)
 
-  // Prevent deleting yourself
   if (userId === currentUser.id) {
     return NextResponse.json({ error: 'Cannot delete your own account' }, { status: 400 })
   }
 
   const workspaceId = currentUser.workspace_id ?? 1
-  const existing = getUserById(userId)
+  const existing = await getUserById(userId)
   if (!existing || (existing.workspace_id ?? 1) !== workspaceId) {
     return NextResponse.json({ error: 'User not found' }, { status: 404 })
   }
 
-  const deleted = deleteUser(userId)
+  const deleted = await deleteUser(userId)
   if (!deleted) {
     return NextResponse.json({ error: 'User not found' }, { status: 404 })
   }
 
   const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-  logAuditEvent({
+  void logAuditEvent({
     action: 'user_delete', actor: currentUser.username, actor_id: currentUser.id,
     target_type: 'user', target_id: userId,
     ip_address: ipAddress,

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase, Task, db_helpers } from '@/lib/db'
+import { Task, db_helpers } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { eventBus } from '@/lib/event-bus'
 import { requireRole } from '@/lib/auth'
 import { mutationLimiter } from '@/lib/rate-limit'
@@ -20,7 +21,7 @@ import {
  * Fetch issues from GitHub for preview before import.
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
@@ -61,7 +62,7 @@ export async function GET(request: NextRequest) {
  * POST /api/github — Action dispatcher for sync, comment, close, status.
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -82,7 +83,7 @@ export async function POST(request: NextRequest) {
       case 'close':
         return await handleClose(body, auth.user.username, auth.user.workspace_id ?? 1)
       case 'status':
-        return handleStatus(auth.user.workspace_id ?? 1)
+        return await handleStatus(auth.user.workspace_id ?? 1)
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
     }
@@ -115,7 +116,6 @@ async function handleSync(
     per_page: 100,
   })
 
-  const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   let imported = 0
   let skipped = 0
@@ -125,12 +125,12 @@ async function handleSync(
   for (const issue of issues) {
     try {
       // Check for duplicate: existing task with same github_repo + github_issue_number
-      const existing = db.prepare(`
+      const existing = (await query(`
         SELECT id FROM tasks
-        WHERE json_extract(metadata, '$.github_repo') = ?
-          AND json_extract(metadata, '$.github_issue_number') = ?
+        WHERE metadata->>'github_repo' = ?
+          AND (metadata->>'github_issue_number')::int = ?
           AND workspace_id = ?
-      `).get(repo, issue.number, workspaceId) as { id: number } | undefined
+      `, [repo, issue.number, workspaceId])).rows[0] as { id: number } | undefined
 
       if (existing) {
         skipped++
@@ -138,8 +138,8 @@ async function handleSync(
       }
 
       // Map priority from labels
-      const priority = mapPriority(issue.labels.map(l => l.name))
-      const tags = issue.labels.map(l => l.name)
+      const priority = mapPriority(issue.labels.map((l: any) => l.name))
+      const tags = issue.labels.map((l: any) => l.name)
       const status = issue.state === 'closed' ? 'done' : 'inbox'
 
       const metadata = {
@@ -150,14 +150,13 @@ async function handleSync(
         github_state: issue.state,
       }
 
-      const stmt = db.prepare(`
+      const insertResult = await query(`
         INSERT INTO tasks (
           title, description, status, priority, assigned_to, created_by,
           created_at, updated_at, tags, metadata, workspace_id
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-
-      const dbResult = stmt.run(
+        RETURNING id
+      `, [
         issue.title,
         issue.body || '',
         status,
@@ -168,12 +167,12 @@ async function handleSync(
         now,
         JSON.stringify(tags),
         JSON.stringify(metadata),
-        workspaceId
-      )
+        workspaceId,
+      ])
 
-      const taskId = dbResult.lastInsertRowid as number
+      const taskId = insertResult.rows[0].id as number
 
-      db_helpers.logActivity(
+      await db_helpers.logActivity(
         'task_created',
         'task',
         taskId,
@@ -183,7 +182,7 @@ async function handleSync(
         workspaceId
       )
 
-      const createdTask = db.prepare('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?').get(taskId, workspaceId) as Task
+      const createdTask = (await query('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?', [taskId, workspaceId])).rows[0] as Task
       const parsedTask = {
         ...createdTask,
         tags: JSON.parse(createdTask.tags || '[]'),
@@ -200,32 +199,32 @@ async function handleSync(
   }
 
   // Log sync to github_syncs table
-  const syncTableHasWorkspace = db
-    .prepare("SELECT 1 as ok FROM pragma_table_info('github_syncs') WHERE name = 'workspace_id'")
-    .get() as { ok?: number } | undefined
-  if (syncTableHasWorkspace?.ok) {
-    db.prepare(`
+  try {
+    await query(`
       INSERT INTO github_syncs (repo, last_synced_at, issue_count, sync_direction, status, error, workspace_id)
       VALUES (?, ?, ?, 'inbound', ?, ?, ?)
-    `).run(
+    `, [
       repo,
       now,
       imported,
       errors > 0 ? 'partial' : 'success',
       errors > 0 ? `${errors} issues failed to import` : null,
-      workspaceId
-    )
-  } else {
-    db.prepare(`
-      INSERT INTO github_syncs (repo, last_synced_at, issue_count, sync_direction, status, error)
-      VALUES (?, ?, ?, 'inbound', ?, ?)
-    `).run(
-      repo,
-      now,
-      imported,
-      errors > 0 ? 'partial' : 'success',
-      errors > 0 ? `${errors} issues failed to import` : null
-    )
+      workspaceId,
+    ])
+  } catch {
+    // Try without workspace_id for older schema
+    try {
+      await query(`
+        INSERT INTO github_syncs (repo, last_synced_at, issue_count, sync_direction, status, error)
+        VALUES (?, ?, ?, 'inbound', ?, ?)
+      `, [
+        repo,
+        now,
+        imported,
+        errors > 0 ? 'partial' : 'success',
+        errors > 0 ? `${errors} issues failed to import` : null,
+      ])
+    } catch { /* ignore */ }
   }
 
   eventBus.broadcast('github.synced', {
@@ -260,7 +259,7 @@ async function handleComment(
 
   await createIssueComment(body.repo, body.issueNumber, body.body)
 
-  db_helpers.logActivity(
+  await db_helpers.logActivity(
     'github_comment',
     'task',
     0,
@@ -295,18 +294,17 @@ async function handleClose(
   await updateIssueState(body.repo, body.issueNumber, 'closed')
 
   // Update local task metadata if we have a linked task
-  const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
-  db.prepare(`
+  await query(`
     UPDATE tasks
-    SET metadata = json_set(metadata, '$.github_state', 'closed'),
+    SET metadata = jsonb_set(metadata::jsonb, '{github_state}', '"closed"'),
         updated_at = ?
-    WHERE json_extract(metadata, '$.github_repo') = ?
-      AND json_extract(metadata, '$.github_issue_number') = ?
+    WHERE metadata->>'github_repo' = ?
+      AND (metadata->>'github_issue_number')::int = ?
       AND workspace_id = ?
-  `).run(now, body.repo, body.issueNumber, workspaceId)
+  `, [now, body.repo, body.issueNumber, workspaceId])
 
-  db_helpers.logActivity(
+  await db_helpers.logActivity(
     'github_close',
     'task',
     0,
@@ -321,17 +319,13 @@ async function handleClose(
 
 // ── Status: return recent sync history ──────────────────────────
 
-function handleStatus(workspaceId: number) {
-  const db = getDatabase()
-  const tableHasWorkspace = db
-    .prepare("SELECT 1 as ok FROM pragma_table_info('github_syncs') WHERE name = 'workspace_id'")
-    .get() as { ok?: number } | undefined
-  const syncs = db.prepare(`
+async function handleStatus(workspaceId: number) {
+  const syncs = (await query(`
     SELECT * FROM github_syncs
-    ${tableHasWorkspace?.ok ? 'WHERE workspace_id = ?' : ''}
+    WHERE workspace_id = ?
     ORDER BY created_at DESC
     LIMIT 20
-  `).all(...(tableHasWorkspace?.ok ? [workspaceId] : []))
+  `, [workspaceId])).rows
 
   return NextResponse.json({ syncs })
 }
@@ -359,14 +353,11 @@ async function handleGitHubStats() {
   const allRepos = await reposRes.json() as Array<Record<string, any>>
 
   // Filter: exclude repos that are forks AND where user has never pushed
-  // A fork the user actively commits to will have pushed_at > created_at (by more than a few seconds)
   const activeRepos = allRepos.filter(r => {
     if (!r.fork) return true
-    // For forks, include only if pushed_at is meaningfully after created_at
-    // (GitHub sets pushed_at = parent's pushed_at on fork creation)
     const created = new Date(r.created_at).getTime()
     const pushed = new Date(r.pushed_at).getTime()
-    return (pushed - created) > 60_000 // pushed > 1min after fork creation
+    return (pushed - created) > 60_000
   })
 
   // Aggregate languages

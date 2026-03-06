@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase, Message } from '@/lib/db'
+import { query, Message } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
@@ -10,17 +10,17 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const { id } = await params
     const workspaceId = auth.user.workspace_id ?? 1
 
-    const message = db
-      .prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?')
-      .get(parseInt(id), workspaceId) as Message | undefined
+    const message = (await query(
+      'SELECT * FROM messages WHERE id = ? AND workspace_id = ?',
+      [parseInt(id), workspaceId]
+    )).rows[0] as Message | undefined
 
     if (!message) {
       return NextResponse.json({ error: 'Message not found' }, { status: 404 })
@@ -45,18 +45,18 @@ export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const { id } = await params
     const workspaceId = auth.user.workspace_id ?? 1
     const body = await request.json()
 
-    const message = db
-      .prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?')
-      .get(parseInt(id), workspaceId) as Message | undefined
+    const message = (await query(
+      'SELECT * FROM messages WHERE id = ? AND workspace_id = ?',
+      [parseInt(id), workspaceId]
+    )).rows[0] as Message | undefined
 
     if (!message) {
       return NextResponse.json({ error: 'Message not found' }, { status: 404 })
@@ -64,12 +64,16 @@ export async function PATCH(
 
     if (body.read) {
       const now = Math.floor(Date.now() / 1000)
-      db.prepare('UPDATE messages SET read_at = ? WHERE id = ? AND workspace_id = ?').run(now, parseInt(id), workspaceId)
+      await query(
+        'UPDATE messages SET read_at = ? WHERE id = ? AND workspace_id = ?',
+        [now, parseInt(id), workspaceId]
+      )
     }
 
-    const updated = db
-      .prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?')
-      .get(parseInt(id), workspaceId) as Message
+    const updated = (await query(
+      'SELECT * FROM messages WHERE id = ? AND workspace_id = ?',
+      [parseInt(id), workspaceId]
+    )).rows[0] as Message
 
     return NextResponse.json({
       message: {

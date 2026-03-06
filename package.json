@@ -19,6 +19,7 @@
     "quality:gate": "pnpm test:all"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.0.2",
     "@scalar/api-reference-react": "^0.8.66",
     "@xyflow/react": "^12.10.0",
     "autoprefixer": "^10.4.20",
@@ -50,6 +51,7 @@
     "@testing-library/react": "^16.1.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.6",
+    "@types/pg": "^8.18.0",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "@types/ws": "^8.18.1",

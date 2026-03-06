@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, db_helpers } from '@/lib/db';
+import { query, db_helpers } from '@/lib/db';
 import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, isAbsolute, resolve } from 'path';
 import { config } from '@/lib/config';
@@ -20,27 +20,25 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase();
     const resolvedParams = await params;
     const agentId = resolvedParams.id;
     const workspaceId = auth.user.workspace_id ?? 1;
-    
+
     // Get agent by ID or name
-    let agent: any;
-    if (isNaN(Number(agentId))) {
-      agent = db.prepare('SELECT * FROM agents WHERE name = ? AND workspace_id = ?').get(agentId, workspaceId);
-    } else {
-      agent = db.prepare('SELECT * FROM agents WHERE id = ? AND workspace_id = ?').get(Number(agentId), workspaceId);
-    }
-    
+    const agent = (await (
+      isNaN(Number(agentId))
+        ? query('SELECT * FROM agents WHERE name = ? AND workspace_id = ?', [agentId, workspaceId])
+        : query('SELECT * FROM agents WHERE id = ? AND workspace_id = ?', [Number(agentId), workspaceId])
+    )).rows[0] as any
+
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     }
-    
+
     // Try reading soul.md from workspace first, fall back to DB
     let soulContent = ''
     let source: 'workspace' | 'database' | 'none' = 'none'
@@ -103,31 +101,29 @@ export async function PUT(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'operator');
+  const auth = await requireRole(request, 'operator');
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
   try {
-    const db = getDatabase();
     const resolvedParams = await params;
     const agentId = resolvedParams.id;
     const workspaceId = auth.user.workspace_id ?? 1;
     const body = await request.json();
     const { soul_content, template_name } = body;
-    
+
     // Get agent by ID or name
-    let agent: any;
-    if (isNaN(Number(agentId))) {
-      agent = db.prepare('SELECT * FROM agents WHERE name = ? AND workspace_id = ?').get(agentId, workspaceId);
-    } else {
-      agent = db.prepare('SELECT * FROM agents WHERE id = ? AND workspace_id = ?').get(Number(agentId), workspaceId);
-    }
-    
+    const agent = (await (
+      isNaN(Number(agentId))
+        ? query('SELECT * FROM agents WHERE name = ? AND workspace_id = ?', [agentId, workspaceId])
+        : query('SELECT * FROM agents WHERE id = ? AND workspace_id = ?', [Number(agentId), workspaceId])
+    )).rows[0] as any
+
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
     }
-    
+
     let newSoulContent = soul_content;
-    
+
     // If template_name is provided, load from template
     if (template_name) {
       if (!config.soulTemplatesDir) {
@@ -139,11 +135,10 @@ export async function PUT(
       } catch (pathError) {
         return NextResponse.json({ error: 'Invalid template name' }, { status: 400 });
       }
-      
+
       try {
         if (existsSync(templatePath)) {
           const templateContent = readFileSync(templatePath, 'utf8');
-          // Replace placeholders with agent info
           newSoulContent = templateContent
             .replace(/{{AGENT_NAME}}/g, agent.name)
             .replace(/{{AGENT_ROLE}}/g, agent.role)
@@ -156,7 +151,7 @@ export async function PUT(
         return NextResponse.json({ error: 'Failed to load template' }, { status: 500 });
       }
     }
-    
+
     const now = Math.floor(Date.now() / 1000);
 
     // Write to workspace file if available
@@ -175,13 +170,12 @@ export async function PUT(
     }
 
     // Update SOUL content in DB
-    const updateStmt = db.prepare(`
-      UPDATE agents
-      SET soul_content = ?, updated_at = ?
-      WHERE ${isNaN(Number(agentId)) ? 'name' : 'id'} = ? AND workspace_id = ?
-    `);
-
-    updateStmt.run(newSoulContent, now, agentId, workspaceId);
+    const col = isNaN(Number(agentId)) ? 'name' : 'id'
+    const idParam = isNaN(Number(agentId)) ? agentId : Number(agentId)
+    await query(
+      `UPDATE agents SET soul_content = ?, updated_at = ? WHERE ${col} = ? AND workspace_id = ?`,
+      [newSoulContent, now, idParam, workspaceId]
+    )
 
     // Log activity
     db_helpers.logActivity(
@@ -213,8 +207,7 @@ export async function PUT(
 }
 
 /**
- * GET /api/agents/[id]/soul/templates - Get available SOUL templates
- * Also handles loading specific template content
+ * PATCH /api/agents/[id]/soul - Get available SOUL templates or specific template content
  */
 export async function PATCH(
   request: NextRequest,
@@ -223,37 +216,36 @@ export async function PATCH(
   try {
     const { searchParams } = new URL(request.url);
     const templateName = searchParams.get('template');
-    
+
     const templatesPath = config.soulTemplatesDir;
-    
+
     if (!templatesPath || !existsSync(templatesPath)) {
       return NextResponse.json({
         templates: [],
         message: 'Templates directory not found'
       });
     }
-    
+
     if (templateName) {
-      // Get specific template content
       let templatePath: string;
       try {
         templatePath = resolveWithin(templatesPath, `${templateName}.md`);
       } catch (pathError) {
         return NextResponse.json({ error: 'Invalid template name' }, { status: 400 });
       }
-      
+
       if (!existsSync(templatePath)) {
         return NextResponse.json({ error: 'Template not found' }, { status: 404 });
       }
-      
+
       const templateContent = readFileSync(templatePath, 'utf8');
-      
+
       return NextResponse.json({
         template_name: templateName,
         content: templateContent
       });
     }
-    
+
     // List all available templates
     const files = readdirSync(templatesPath);
     const templates = files
@@ -262,20 +254,19 @@ export async function PATCH(
         const name = file.replace('.md', '');
         const templatePath = join(templatesPath, file);
         const content = readFileSync(templatePath, 'utf8');
-        
-        // Extract first line as description
+
         const firstLine = content.split('\n')[0];
-        const description = firstLine.startsWith('#') 
-          ? firstLine.replace(/^#+\s*/, '') 
+        const description = firstLine.startsWith('#')
+          ? firstLine.replace(/^#+\s*/, '')
           : `${name} template`;
-        
+
         return {
           name,
           description,
           size: content.length
         };
       });
-    
+
     return NextResponse.json({ templates });
   } catch (error) {
     logger.error({ err: error }, 'PATCH /api/agents/[id]/soul error');

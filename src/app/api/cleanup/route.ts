@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { getDatabase, logAuditEvent } from '@/lib/db'
+import { logAuditEvent } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { config } from '@/lib/config'
 import { heavyLimiter } from '@/lib/rate-limit'
 import { countStaleGatewaySessions, pruneGatewaySessionsOlderThan } from '@/lib/sessions'
@@ -16,10 +17,9 @@ interface CleanupResult {
  * GET /api/cleanup - Show retention policy and what would be cleaned
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-  const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   const ret = config.retention
 
@@ -32,7 +32,7 @@ export async function GET(request: NextRequest) {
     }
     const cutoff = now - days * 86400
     try {
-      const row = db.prepare(`SELECT COUNT(*) as c FROM ${table} WHERE ${column} < ?`).get(cutoff) as any
+      const row = (await query(`SELECT COUNT(*) as c FROM ${table} WHERE ${column} < ?`, [cutoff])).rows[0] as any
       preview.push({
         table: label,
         retention_days: days,
@@ -79,7 +79,7 @@ export async function GET(request: NextRequest) {
  * Body: { dry_run?: boolean }
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = heavyLimiter(request)
@@ -88,7 +88,6 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => ({}))
   const dryRun = body.dry_run === true
 
-  const db = getDatabase()
   const now = Math.floor(Date.now() / 1000)
   const results: CleanupResult[] = []
   let totalDeleted = 0
@@ -99,7 +98,7 @@ export async function POST(request: NextRequest) {
 
     try {
       if (dryRun) {
-        const row = db.prepare(`SELECT COUNT(*) as c FROM ${table} WHERE ${column} < ?`).get(cutoff) as any
+        const row = (await query(`SELECT COUNT(*) as c FROM ${table} WHERE ${column} < ?`, [cutoff])).rows[0] as any
         results.push({
           table: label,
           deleted: row.c,
@@ -108,14 +107,15 @@ export async function POST(request: NextRequest) {
         })
         totalDeleted += row.c
       } else {
-        const res = db.prepare(`DELETE FROM ${table} WHERE ${column} < ?`).run(cutoff)
+        const res = await query(`DELETE FROM ${table} WHERE ${column} < ?`, [cutoff])
+        const deleted = res.rowCount ?? 0
         results.push({
           table: label,
-          deleted: res.changes,
+          deleted,
           cutoff_date: new Date(cutoff * 1000).toISOString().split('T')[0],
           retention_days: days,
         })
-        totalDeleted += res.changes
+        totalDeleted += deleted
       }
     } catch {
       results.push({ table: label, deleted: 0, cutoff_date: '', retention_days: days })
@@ -164,7 +164,7 @@ export async function POST(request: NextRequest) {
 
   if (!dryRun && totalDeleted > 0) {
     const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-    logAuditEvent({
+    void logAuditEvent({
       action: 'data_cleanup',
       actor: auth.user.username,
       actor_id: auth.user.id,

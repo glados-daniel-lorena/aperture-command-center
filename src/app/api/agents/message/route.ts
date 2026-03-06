@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase, db_helpers } from '@/lib/db'
+import { query, db_helpers } from '@/lib/db'
 import { runOpenClaw } from '@/lib/command'
 import { requireRole } from '@/lib/auth'
 import { validateBody, createMessageSchema } from '@/lib/validation'
@@ -7,7 +7,7 @@ import { mutationLimiter } from '@/lib/rate-limit'
 import { logger } from '@/lib/logger'
 
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -19,11 +19,12 @@ export async function POST(request: NextRequest) {
     const { to, message } = result.data
     const from = auth.user.display_name || auth.user.username || 'system'
 
-    const db = getDatabase()
-    const workspaceId = auth.user.workspace_id ?? 1;
-    const agent = db
-      .prepare('SELECT * FROM agents WHERE name = ? AND workspace_id = ?')
-      .get(to, workspaceId) as any
+    const workspaceId = auth.user.workspace_id ?? 1
+    const agent = (await query(
+      'SELECT * FROM agents WHERE name = ? AND workspace_id = ?',
+      [to, workspaceId]
+    )).rows[0] as any
+
     if (!agent) {
       return NextResponse.json({ error: 'Recipient agent not found' }, { status: 404 })
     }

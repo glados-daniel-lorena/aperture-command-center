@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { getDatabase, logAuditEvent } from '@/lib/db'
+import { logAuditEvent } from '@/lib/db'
+import { query, withTransaction } from '@/lib/postgres'
 import { config } from '@/lib/config'
 import { mutationLimiter } from '@/lib/rate-limit'
 import { validateBody, updateSettingsSchema } from '@/lib/validation'
@@ -40,11 +41,10 @@ const settingDefinitions: Record<string, { category: string; description: string
  * GET /api/settings - List all settings (grouped by category)
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-  const db = getDatabase()
-  const rows = db.prepare('SELECT * FROM settings ORDER BY category, key').all() as SettingRow[]
+  const rows = (await query('SELECT * FROM settings ORDER BY category, key', [])).rows as SettingRow[]
   const stored = new Map(rows.map(r => [r.key, r]))
 
   // Merge defaults with stored values
@@ -101,7 +101,7 @@ export async function GET(request: NextRequest) {
  * Body: { settings: { key: value, ... } }
  */
 export async function PUT(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -111,40 +111,36 @@ export async function PUT(request: NextRequest) {
   if ('error' in result) return result.error
   const body = result.data
 
-  const db = getDatabase()
-  const upsert = db.prepare(`
-    INSERT INTO settings (key, value, description, category, updated_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, unixepoch())
-    ON CONFLICT(key) DO UPDATE SET
-      value = excluded.value,
-      updated_by = excluded.updated_by,
-      updated_at = unixepoch()
-  `)
-
   const updated: string[] = []
   const changes: Record<string, { old: string | null; new: string }> = {}
 
-  const txn = db.transaction(() => {
+  await withTransaction(async (txQuery) => {
     for (const [key, value] of Object.entries(body.settings)) {
       const strValue = String(value)
       const def = settingDefinitions[key]
       const category = def?.category ?? 'custom'
       const description = def?.description ?? null
 
-      // Get old value for audit
-      const existing = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
+      const existing = (await txQuery(
+        'SELECT value FROM settings WHERE key = ?',
+        [key]
+      )).rows[0] as { value: string } | undefined
       changes[key] = { old: existing?.value ?? null, new: strValue }
 
-      upsert.run(key, strValue, description, category, auth.user.username)
+      await txQuery(`
+        INSERT INTO settings (key, value, description, category, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, EXTRACT(EPOCH FROM NOW())::INTEGER)
+        ON CONFLICT(key) DO UPDATE SET
+          value = EXCLUDED.value,
+          updated_by = EXCLUDED.updated_by,
+          updated_at = EXTRACT(EPOCH FROM NOW())::INTEGER
+      `, [key, strValue, description, category, auth.user.username])
       updated.push(key)
     }
   })
 
-  txn()
-
-  // Audit log
   const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-  logAuditEvent({
+  void logAuditEvent({
     action: 'settings_update',
     actor: auth.user.username,
     actor_id: auth.user.id,
@@ -159,7 +155,7 @@ export async function PUT(request: NextRequest) {
  * DELETE /api/settings?key=... - Reset a setting to default
  */
 export async function DELETE(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -173,17 +169,16 @@ export async function DELETE(request: NextRequest) {
     return NextResponse.json({ error: 'key parameter required' }, { status: 400 })
   }
 
-  const db = getDatabase()
-  const existing = db.prepare('SELECT value FROM settings WHERE key = ?').get(key) as { value: string } | undefined
+  const existing = (await query('SELECT value FROM settings WHERE key = ?', [key])).rows[0] as { value: string } | undefined
 
   if (!existing) {
     return NextResponse.json({ error: 'Setting not found or already at default' }, { status: 404 })
   }
 
-  db.prepare('DELETE FROM settings WHERE key = ?').run(key)
+  await query('DELETE FROM settings WHERE key = ?', [key])
 
   const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-  logAuditEvent({
+  void logAuditEvent({
     action: 'settings_reset',
     actor: auth.user.username,
     actor_id: auth.user.id,

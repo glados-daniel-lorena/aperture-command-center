@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase } from '@/lib/db';
+import { query } from '@/lib/db';
 import { requireRole } from '@/lib/auth';
 import { logger } from '@/lib/logger';
 
@@ -42,43 +42,25 @@ function parseSectionsParam(raw: string | null): { value?: Set<DiagnosticsSectio
 
 /**
  * GET /api/agents/[id]/diagnostics - Agent Self-Diagnostics API
- *
- * Provides an agent with its own performance metrics, error analysis,
- * and trend data so it can self-optimize.
- *
- * Query params:
- *   hours   - Time window in hours (default: 24, max: 720 = 30 days)
- *   section - Comma-separated sections to include (default: all)
- *             Options: summary, tasks, errors, activity, trends, tokens
- *
- * Response includes:
- *   summary     - High-level KPIs (throughput, error rate, activity count)
- *   tasks       - Task completion breakdown by status and priority
- *   errors      - Error frequency, types, and recent error details
- *   activity    - Activity breakdown by type with hourly timeline
- *   trends      - Multi-period comparison for trend detection
- *   tokens      - Token usage by model with cost estimates
  */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'viewer');
+  const auth = await requireRole(request, 'viewer');
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
   try {
-    const db = getDatabase();
     const resolvedParams = await params;
     const agentId = resolvedParams.id;
     const workspaceId = auth.user.workspace_id ?? 1;
 
     // Resolve agent by ID or name
-    let agent: any;
-    if (/^\d+$/.test(agentId)) {
-      agent = db.prepare('SELECT id, name, role, status, last_seen, created_at FROM agents WHERE id = ? AND workspace_id = ?').get(Number(agentId), workspaceId);
-    } else {
-      agent = db.prepare('SELECT id, name, role, status, last_seen, created_at FROM agents WHERE name = ? AND workspace_id = ?').get(agentId, workspaceId);
-    }
+    const agent = (await (
+      /^\d+$/.test(agentId)
+        ? query('SELECT id, name, role, status, last_seen, created_at FROM agents WHERE id = ? AND workspace_id = ?', [Number(agentId), workspaceId])
+        : query('SELECT id, name, role, status, last_seen, created_at FROM agents WHERE name = ? AND workspace_id = ?', [agentId, workspaceId])
+    )).rows[0] as any
 
     if (!agent) {
       return NextResponse.json({ error: 'Agent not found' }, { status: 404 });
@@ -89,7 +71,6 @@ export async function GET(
     const privileged = searchParams.get('privileged') === '1';
     const isSelfRequest = (requesterAgentName || auth.user.username) === agent.name;
 
-    // Self-only by default. Cross-agent access requires explicit privileged override.
     if (!isSelfRequest && !(privileged && auth.user.role === 'admin')) {
       return NextResponse.json(
         { error: 'Diagnostics are self-scoped. Use privileged=1 with admin role for cross-agent access.' },
@@ -119,27 +100,27 @@ export async function GET(
     };
 
     if (sections.has('summary')) {
-      result.summary = buildSummary(db, agent.name, workspaceId, since);
+      result.summary = await buildSummary(agent.name, workspaceId, since);
     }
 
     if (sections.has('tasks')) {
-      result.tasks = buildTaskMetrics(db, agent.name, workspaceId, since);
+      result.tasks = await buildTaskMetrics(agent.name, workspaceId, since);
     }
 
     if (sections.has('errors')) {
-      result.errors = buildErrorAnalysis(db, agent.name, workspaceId, since);
+      result.errors = await buildErrorAnalysis(agent.name, workspaceId, since);
     }
 
     if (sections.has('activity')) {
-      result.activity = buildActivityBreakdown(db, agent.name, workspaceId, since);
+      result.activity = await buildActivityBreakdown(agent.name, workspaceId, since);
     }
 
     if (sections.has('trends')) {
-      result.trends = buildTrends(db, agent.name, workspaceId, hours);
+      result.trends = await buildTrends(agent.name, workspaceId, hours);
     }
 
     if (sections.has('tokens')) {
-      result.tokens = buildTokenMetrics(db, agent.name, workspaceId, since);
+      result.tokens = await buildTokenMetrics(agent.name, workspaceId, since);
     }
 
     return NextResponse.json(result);
@@ -150,22 +131,26 @@ export async function GET(
 }
 
 /** High-level KPIs */
-function buildSummary(db: any, agentName: string, workspaceId: number, since: number) {
-  const tasksDone = (db.prepare(
-    `SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND workspace_id = ? AND status = 'done' AND updated_at >= ?`
-  ).get(agentName, workspaceId, since) as any).c;
+async function buildSummary(agentName: string, workspaceId: number, since: number) {
+  const tasksDone = ((await query(
+    `SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND workspace_id = ? AND status = 'done' AND updated_at >= ?`,
+    [agentName, workspaceId, since]
+  )).rows[0] as any).c;
 
-  const tasksTotal = (db.prepare(
-    `SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND workspace_id = ?`
-  ).get(agentName, workspaceId) as any).c;
+  const tasksTotal = ((await query(
+    `SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND workspace_id = ?`,
+    [agentName, workspaceId]
+  )).rows[0] as any).c;
 
-  const activityCount = (db.prepare(
-    `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ?`
-  ).get(agentName, workspaceId, since) as any).c;
+  const activityCount = ((await query(
+    `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ?`,
+    [agentName, workspaceId, since]
+  )).rows[0] as any).c;
 
-  const errorCount = (db.prepare(
-    `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND type LIKE '%error%'`
-  ).get(agentName, workspaceId, since) as any).c;
+  const errorCount = ((await query(
+    `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND type LIKE '%error%'`,
+    [agentName, workspaceId, since]
+  )).rows[0] as any).c;
 
   const errorRate = activityCount > 0 ? Math.round((errorCount / activityCount) * 10000) / 100 : 0;
 
@@ -179,20 +164,22 @@ function buildSummary(db: any, agentName: string, workspaceId: number, since: nu
 }
 
 /** Task completion breakdown */
-function buildTaskMetrics(db: any, agentName: string, workspaceId: number, since: number) {
-  const byStatus = db.prepare(
-    `SELECT status, COUNT(*) as count FROM tasks WHERE assigned_to = ? AND workspace_id = ? GROUP BY status`
-  ).all(agentName, workspaceId) as Array<{ status: string; count: number }>;
+async function buildTaskMetrics(agentName: string, workspaceId: number, since: number) {
+  const byStatus = (await query(
+    `SELECT status, COUNT(*) as count FROM tasks WHERE assigned_to = ? AND workspace_id = ? GROUP BY status`,
+    [agentName, workspaceId]
+  )).rows as Array<{ status: string; count: number }>;
 
-  const byPriority = db.prepare(
-    `SELECT priority, COUNT(*) as count FROM tasks WHERE assigned_to = ? AND workspace_id = ? GROUP BY priority`
-  ).all(agentName, workspaceId) as Array<{ priority: string; count: number }>;
+  const byPriority = (await query(
+    `SELECT priority, COUNT(*) as count FROM tasks WHERE assigned_to = ? AND workspace_id = ? GROUP BY priority`,
+    [agentName, workspaceId]
+  )).rows as Array<{ priority: string; count: number }>;
 
-  const recentCompleted = db.prepare(
-    `SELECT id, title, priority, updated_at FROM tasks WHERE assigned_to = ? AND workspace_id = ? AND status = 'done' AND updated_at >= ? ORDER BY updated_at DESC LIMIT 10`
-  ).all(agentName, workspaceId, since) as any[];
+  const recentCompleted = (await query(
+    `SELECT id, title, priority, updated_at FROM tasks WHERE assigned_to = ? AND workspace_id = ? AND status = 'done' AND updated_at >= ? ORDER BY updated_at DESC LIMIT 10`,
+    [agentName, workspaceId, since]
+  )).rows as any[];
 
-  // Estimate throughput: tasks completed per day in the window
   const windowDays = Math.max((Math.floor(Date.now() / 1000) - since) / 86400, 1);
   const completedInWindow = recentCompleted.length;
   const throughputPerDay = Math.round((completedInWindow / windowDays) * 100) / 100;
@@ -206,14 +193,16 @@ function buildTaskMetrics(db: any, agentName: string, workspaceId: number, since
 }
 
 /** Error frequency and analysis */
-function buildErrorAnalysis(db: any, agentName: string, workspaceId: number, since: number) {
-  const errorActivities = db.prepare(
-    `SELECT type, COUNT(*) as count FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND (type LIKE '%error%' OR type LIKE '%fail%') GROUP BY type ORDER BY count DESC`
-  ).all(agentName, workspaceId, since) as Array<{ type: string; count: number }>;
+async function buildErrorAnalysis(agentName: string, workspaceId: number, since: number) {
+  const errorActivities = (await query(
+    `SELECT type, COUNT(*) as count FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND (type LIKE '%error%' OR type LIKE '%fail%') GROUP BY type ORDER BY count DESC`,
+    [agentName, workspaceId, since]
+  )).rows as Array<{ type: string; count: number }>;
 
-  const recentErrors = db.prepare(
-    `SELECT id, type, description, data, created_at FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND (type LIKE '%error%' OR type LIKE '%fail%') ORDER BY created_at DESC LIMIT 20`
-  ).all(agentName, workspaceId, since) as any[];
+  const recentErrors = (await query(
+    `SELECT id, type, description, data, created_at FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND (type LIKE '%error%' OR type LIKE '%fail%') ORDER BY created_at DESC LIMIT 20`,
+    [agentName, workspaceId, since]
+  )).rows as any[];
 
   return {
     by_type: errorActivities,
@@ -226,14 +215,16 @@ function buildErrorAnalysis(db: any, agentName: string, workspaceId: number, sin
 }
 
 /** Activity breakdown with hourly timeline */
-function buildActivityBreakdown(db: any, agentName: string, workspaceId: number, since: number) {
-  const byType = db.prepare(
-    `SELECT type, COUNT(*) as count FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? GROUP BY type ORDER BY count DESC`
-  ).all(agentName, workspaceId, since) as Array<{ type: string; count: number }>;
+async function buildActivityBreakdown(agentName: string, workspaceId: number, since: number) {
+  const byType = (await query(
+    `SELECT type, COUNT(*) as count FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? GROUP BY type ORDER BY count DESC`,
+    [agentName, workspaceId, since]
+  )).rows as Array<{ type: string; count: number }>;
 
-  const timeline = db.prepare(
-    `SELECT (created_at / 3600) * 3600 as hour_bucket, COUNT(*) as count FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? GROUP BY hour_bucket ORDER BY hour_bucket ASC`
-  ).all(agentName, workspaceId, since) as Array<{ hour_bucket: number; count: number }>;
+  const timeline = (await query(
+    `SELECT (created_at / 3600) * 3600 as hour_bucket, COUNT(*) as count FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? GROUP BY hour_bucket ORDER BY hour_bucket ASC`,
+    [agentName, workspaceId, since]
+  )).rows as Array<{ hour_bucket: number; count: number }>;
 
   return {
     by_type: byType,
@@ -245,32 +236,33 @@ function buildActivityBreakdown(db: any, agentName: string, workspaceId: number,
   };
 }
 
-/** Multi-period trend comparison for anomaly/trend detection */
-function buildTrends(db: any, agentName: string, workspaceId: number, hours: number) {
+/** Multi-period trend comparison */
+async function buildTrends(agentName: string, workspaceId: number, hours: number) {
   const now = Math.floor(Date.now() / 1000);
-
-  // Compare current period vs previous period of same length
   const currentSince = now - hours * 3600;
   const previousSince = currentSince - hours * 3600;
 
-  const periodMetrics = (since: number, until: number) => {
-    const activities = (db.prepare(
-      `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND created_at < ?`
-    ).get(agentName, workspaceId, since, until) as any).c;
+  async function periodMetrics(since: number, until: number) {
+    const activities = ((await query(
+      `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND created_at < ?`,
+      [agentName, workspaceId, since, until]
+    )).rows[0] as any).c;
 
-    const errors = (db.prepare(
-      `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND created_at < ? AND (type LIKE '%error%' OR type LIKE '%fail%')`
-    ).get(agentName, workspaceId, since, until) as any).c;
+    const errors = ((await query(
+      `SELECT COUNT(*) as c FROM activities WHERE actor = ? AND workspace_id = ? AND created_at >= ? AND created_at < ? AND (type LIKE '%error%' OR type LIKE '%fail%')`,
+      [agentName, workspaceId, since, until]
+    )).rows[0] as any).c;
 
-    const tasksCompleted = (db.prepare(
-      `SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND workspace_id = ? AND status = 'done' AND updated_at >= ? AND updated_at < ?`
-    ).get(agentName, workspaceId, since, until) as any).c;
+    const tasksCompleted = ((await query(
+      `SELECT COUNT(*) as c FROM tasks WHERE assigned_to = ? AND workspace_id = ? AND status = 'done' AND updated_at >= ? AND updated_at < ?`,
+      [agentName, workspaceId, since, until]
+    )).rows[0] as any).c;
 
     return { activities, errors, tasks_completed: tasksCompleted };
-  };
+  }
 
-  const current = periodMetrics(currentSince, now);
-  const previous = periodMetrics(previousSince, currentSince);
+  const current = await periodMetrics(currentSince, now);
+  const previous = await periodMetrics(previousSince, currentSince);
 
   const pctChange = (cur: number, prev: number) => {
     if (prev === 0) return cur > 0 ? 100 : 0;
@@ -293,7 +285,6 @@ function buildTrends(db: any, agentName: string, workspaceId: number, hours: num
 function buildTrendAlerts(current: { activities: number; errors: number; tasks_completed: number }, previous: { activities: number; errors: number; tasks_completed: number }) {
   const alerts: Array<{ level: string; message: string }> = [];
 
-  // Error rate spike
   if (current.errors > 0 && previous.errors > 0) {
     const errorIncrease = (current.errors - previous.errors) / previous.errors;
     if (errorIncrease > 0.5) {
@@ -303,14 +294,12 @@ function buildTrendAlerts(current: { activities: number; errors: number; tasks_c
     alerts.push({ level: 'warning', message: `New error pattern: ${current.errors} errors (none in previous period)` });
   }
 
-  // Throughput drop
   if (previous.tasks_completed > 0 && current.tasks_completed === 0) {
     alerts.push({ level: 'info', message: 'No tasks completed in current period (possible stall)' });
   } else if (previous.tasks_completed > 2 && current.tasks_completed < previous.tasks_completed * 0.5) {
     alerts.push({ level: 'info', message: `Task throughput dropped ${Math.round((1 - current.tasks_completed / previous.tasks_completed) * 100)}%` });
   }
 
-  // Activity drop (possible offline)
   if (previous.activities > 5 && current.activities < previous.activities * 0.25) {
     alerts.push({ level: 'warning', message: `Activity dropped ${Math.round((1 - current.activities / previous.activities) * 100)}% — agent may be stalled` });
   }
@@ -319,12 +308,12 @@ function buildTrendAlerts(current: { activities: number; errors: number; tasks_c
 }
 
 /** Token usage by model */
-function buildTokenMetrics(db: any, agentName: string, workspaceId: number, since: number) {
+async function buildTokenMetrics(agentName: string, workspaceId: number, since: number) {
   try {
-    // session_id on token_usage may store agent name or session key
-    const byModel = db.prepare(
-      `SELECT model, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens, COUNT(*) as request_count FROM token_usage WHERE session_id = ? AND workspace_id = ? AND created_at >= ? GROUP BY model ORDER BY (input_tokens + output_tokens) DESC`
-    ).all(agentName, workspaceId, since) as Array<{ model: string; input_tokens: number; output_tokens: number; request_count: number }>;
+    const byModel = (await query(
+      `SELECT model, SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens, COUNT(*) as request_count FROM token_usage WHERE session_id = ? AND workspace_id = ? AND created_at >= ? GROUP BY model ORDER BY (input_tokens + output_tokens) DESC`,
+      [agentName, workspaceId, since]
+    )).rows as Array<{ model: string; input_tokens: number; output_tokens: number; request_count: number }>;
 
     const total = byModel.reduce((acc, r) => ({
       input_tokens: acc.input_tokens + r.input_tokens,
@@ -337,7 +326,6 @@ function buildTokenMetrics(db: any, agentName: string, workspaceId: number, sinc
       total,
     };
   } catch {
-    // token_usage table may not exist
     return { by_model: [], total: { input_tokens: 0, output_tokens: 0, requests: 0 } };
   }
 }

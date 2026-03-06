@@ -10,7 +10,7 @@ export async function POST(
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const params = await context.params
@@ -21,7 +21,7 @@ export async function POST(
 
   try {
     const body = await request.json().catch(() => ({}))
-    const created = createTenantDecommissionJob(tenantId, {
+    const created = await createTenantDecommissionJob(tenantId, {
       dry_run: body?.dry_run,
       remove_linux_user: body?.remove_linux_user,
       remove_state_dirs: body?.remove_state_dirs,

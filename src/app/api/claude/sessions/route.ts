@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { requireRole } from '@/lib/auth'
 import { syncClaudeSessions } from '@/lib/claude-sessions'
 import { logger } from '@/lib/logger'
@@ -14,11 +14,10 @@ import { logger } from '@/lib/logger'
  *   offset=0       — pagination offset
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const { searchParams } = new URL(request.url)
 
     const active = searchParams.get('active')
@@ -26,37 +25,37 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200)
     const offset = parseInt(searchParams.get('offset') || '0')
 
-    let query = 'SELECT * FROM claude_sessions WHERE 1=1'
+    let sql = 'SELECT * FROM claude_sessions WHERE 1=1'
     const params: any[] = []
 
     if (active === '1') {
-      query += ' AND is_active = 1'
+      sql += ' AND is_active = 1'
     }
 
     if (project) {
-      query += ' AND project_slug = ?'
+      sql += ' AND project_slug = ?'
       params.push(project)
     }
 
-    query += ' ORDER BY last_message_at DESC LIMIT ? OFFSET ?'
+    sql += ' ORDER BY last_message_at DESC LIMIT ? OFFSET ?'
     params.push(limit, offset)
 
-    const sessions = db.prepare(query).all(...params)
+    const sessions = (await query(sql, params)).rows
 
     // Get total count
-    let countQuery = 'SELECT COUNT(*) as total FROM claude_sessions WHERE 1=1'
+    let countSql = 'SELECT COUNT(*) as total FROM claude_sessions WHERE 1=1'
     const countParams: any[] = []
     if (active === '1') {
-      countQuery += ' AND is_active = 1'
+      countSql += ' AND is_active = 1'
     }
     if (project) {
-      countQuery += ' AND project_slug = ?'
+      countSql += ' AND project_slug = ?'
       countParams.push(project)
     }
-    const { total } = db.prepare(countQuery).get(...countParams) as { total: number }
+    const { total } = (await query(countSql, countParams)).rows[0] as { total: number }
 
     // Aggregate stats
-    const stats = db.prepare(`
+    const stats = (await query(`
       SELECT
         COUNT(*) as total_sessions,
         SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) as active_sessions,
@@ -65,7 +64,7 @@ export async function GET(request: NextRequest) {
         SUM(estimated_cost) as total_estimated_cost,
         COUNT(DISTINCT project_slug) as unique_projects
       FROM claude_sessions
-    `).get() as any
+    `)).rows[0] as any
 
     return NextResponse.json({
       sessions,
@@ -89,7 +88,7 @@ export async function GET(request: NextRequest) {
  * POST /api/claude/sessions — Trigger a manual scan of local Claude sessions
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {

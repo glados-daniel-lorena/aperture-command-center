@@ -1,14 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getUserFromRequest, updateUser, requireRole } from '@/lib/auth'
-import { logAuditEvent } from '@/lib/db'
+import { query, logAuditEvent } from '@/lib/db'
 import { verifyPassword } from '@/lib/password'
 import { logger } from '@/lib/logger'
 
 export async function GET(request: Request) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-  const user = getUserFromRequest(request)
+  const user = await getUserFromRequest(request)
 
   if (!user) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
@@ -33,7 +33,7 @@ export async function GET(request: Request) {
  * Body: { current_password, new_password } and/or { display_name }
  */
 export async function PATCH(request: NextRequest) {
-  const user = getUserFromRequest(request)
+  const user = await getUserFromRequest(request)
   if (!user) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
   }
@@ -59,9 +59,7 @@ export async function PATCH(request: NextRequest) {
       }
 
       // Verify current password by fetching stored hash
-      const { getDatabase } = await import('@/lib/db')
-      const db = getDatabase()
-      const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(user.id) as any
+      const row = (await query('SELECT password_hash FROM users WHERE id = ?', [user.id])).rows[0] as any
       if (!row || !verifyPassword(current_password, row.password_hash)) {
         return NextResponse.json({ error: 'Current password is incorrect' }, { status: 403 })
       }
@@ -81,7 +79,7 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: 'No updates provided' }, { status: 400 })
     }
 
-    const updated = updateUser(user.id, updates)
+    const updated = await updateUser(user.id, updates)
     if (!updated) {
       return NextResponse.json({ error: 'User not found' }, { status: 404 })
     }

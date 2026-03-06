@@ -5,7 +5,7 @@ import { existsSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { runCommand, runOpenClaw, runClawdbot } from '@/lib/command'
 import { config } from '@/lib/config'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { getAllGatewaySessions, getAgentLiveStatuses } from '@/lib/sessions'
 import { requireRole } from '@/lib/auth'
 import { MODEL_CATALOG } from '@/lib/models'
@@ -13,7 +13,7 @@ import { logger } from '@/lib/logger'
 import { detectProviderSubscriptions, getPrimarySubscription } from '@/lib/provider-subscriptions'
 
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
@@ -70,17 +70,16 @@ async function getDashboardData(workspaceId: number) {
   return { ...system, db: dbStats }
 }
 
-function getDbStats(workspaceId: number) {
+async function getDbStats(workspaceId: number) {
   try {
-    const db = getDatabase()
     const now = Math.floor(Date.now() / 1000)
     const day = now - 86400
     const week = now - 7 * 86400
 
     // Task breakdown
-    const taskStats = db.prepare(`
+    const taskStats = (await query(`
       SELECT status, COUNT(*) as count FROM tasks WHERE workspace_id = ? GROUP BY status
-    `).all(workspaceId) as Array<{ status: string; count: number }>
+    `, [workspaceId])).rows as Array<{ status: string; count: number }>
     const tasksByStatus: Record<string, number> = {}
     let totalTasks = 0
     for (const row of taskStats) {
@@ -89,9 +88,9 @@ function getDbStats(workspaceId: number) {
     }
 
     // Agent breakdown
-    const agentStats = db.prepare(`
+    const agentStats = (await query(`
       SELECT status, COUNT(*) as count FROM agents WHERE workspace_id = ? GROUP BY status
-    `).all(workspaceId) as Array<{ status: string; count: number }>
+    `, [workspaceId])).rows as Array<{ status: string; count: number }>
     const agentsByStatus: Record<string, number> = {}
     let totalAgents = 0
     for (const row of agentStats) {
@@ -100,70 +99,41 @@ function getDbStats(workspaceId: number) {
     }
 
     // Audit events (24h / 7d)
-    const auditDay = (db.prepare('SELECT COUNT(*) as c FROM audit_log WHERE created_at > ?').get(day) as any).c
-    const auditWeek = (db.prepare('SELECT COUNT(*) as c FROM audit_log WHERE created_at > ?').get(week) as any).c
+    const auditDay = ((await query('SELECT COUNT(*) as c FROM audit_log WHERE created_at > ?', [day])).rows[0] as any).c
+    const auditWeek = ((await query('SELECT COUNT(*) as c FROM audit_log WHERE created_at > ?', [week])).rows[0] as any).c
 
     // Security events (login failures in last 24h)
-    const loginFailures = (db.prepare(
-      "SELECT COUNT(*) as c FROM audit_log WHERE action = 'login_failed' AND created_at > ?"
-    ).get(day) as any).c
+    const loginFailures = ((await query(
+      "SELECT COUNT(*) as c FROM audit_log WHERE action = 'login_failed' AND created_at > ?",
+      [day]
+    )).rows[0] as any).c
 
     // Activities (24h)
-    const activityDay = (
-      db.prepare('SELECT COUNT(*) as c FROM activities WHERE created_at > ? AND workspace_id = ?').get(day, workspaceId) as any
-    ).c
+    const activityDay = ((await query(
+      'SELECT COUNT(*) as c FROM activities WHERE created_at > ? AND workspace_id = ?',
+      [day, workspaceId]
+    )).rows[0] as any).c
 
     // Notifications (unread)
-    const unreadNotifs = (
-      db.prepare('SELECT COUNT(*) as c FROM notifications WHERE read_at IS NULL AND workspace_id = ?').get(workspaceId) as any
-    ).c
+    const unreadNotifs = ((await query(
+      'SELECT COUNT(*) as c FROM notifications WHERE read_at IS NULL AND workspace_id = ?',
+      [workspaceId]
+    )).rows[0] as any).c
 
     // Pipeline runs (active + recent)
     let pipelineActive = 0
     let pipelineRecent = 0
     try {
-      pipelineActive = (db.prepare("SELECT COUNT(*) as c FROM pipeline_runs WHERE status = 'running'").get() as any).c
-      pipelineRecent = (db.prepare('SELECT COUNT(*) as c FROM pipeline_runs WHERE created_at > ?').get(day) as any).c
+      pipelineActive = ((await query("SELECT COUNT(*) as c FROM pipeline_runs WHERE status = 'running'", [])).rows[0] as any).c
+      pipelineRecent = ((await query('SELECT COUNT(*) as c FROM pipeline_runs WHERE created_at > ?', [day])).rows[0] as any).c
     } catch {
       // Pipeline tables may not exist yet
-    }
-
-    // Latest backup
-    let latestBackup: { name: string; size: number; age_hours: number } | null = null
-    try {
-      const { readdirSync } = require('fs')
-      const { join, dirname } = require('path')
-      const backupDir = join(dirname(config.dbPath), 'backups')
-      const files = readdirSync(backupDir)
-        .filter((f: string) => f.endsWith('.db'))
-        .map((f: string) => {
-          const stat = statSync(join(backupDir, f))
-          return { name: f, size: stat.size, mtime: stat.mtimeMs }
-        })
-        .sort((a: any, b: any) => b.mtime - a.mtime)
-      if (files.length > 0) {
-        latestBackup = {
-          name: files[0].name,
-          size: files[0].size,
-          age_hours: Math.round((Date.now() - files[0].mtime) / 3600000),
-        }
-      }
-    } catch {
-      // No backups dir
-    }
-
-    // DB file size
-    let dbSizeBytes = 0
-    try {
-      dbSizeBytes = statSync(config.dbPath).size
-    } catch {
-      // ignore
     }
 
     // Webhook configs count
     let webhookCount = 0
     try {
-      webhookCount = (db.prepare('SELECT COUNT(*) as c FROM webhooks').get() as any).c
+      webhookCount = ((await query('SELECT COUNT(*) as c FROM webhooks', [])).rows[0] as any).c
     } catch {
       // table may not exist
     }
@@ -175,8 +145,6 @@ function getDbStats(workspaceId: number) {
       activities: { day: activityDay },
       notifications: { unread: unreadNotifs },
       pipelines: { active: pipelineActive, recentDay: pipelineRecent },
-      backup: latestBackup,
-      dbSizeBytes,
       webhookCount,
     }
   } catch (err) {
@@ -296,24 +264,15 @@ async function getSystemStatus(workspaceId: number) {
 
     // Sync agent statuses in DB from live session data
     try {
-      const db = getDatabase()
       const liveStatuses = getAgentLiveStatuses()
       const now = Math.floor(Date.now() / 1000)
-      // Match by: exact name, lowercase, or normalized (spaces→hyphens)
-      const updateStmt = db.prepare(
-        `UPDATE agents SET status = ?, last_seen = ?, updated_at = ?
-         WHERE workspace_id = ?
-           AND (LOWER(name) = LOWER(?)
-           OR LOWER(REPLACE(name, ' ', '-')) = LOWER(?))`
-      )
       for (const [agentName, info] of liveStatuses) {
-        updateStmt.run(
-          info.status,
-          Math.floor(info.lastActivity / 1000),
-          now,
-          workspaceId,
-          agentName,
-          agentName
+        await query(
+          `UPDATE agents SET status = ?, last_seen = ?, updated_at = ?
+           WHERE workspace_id = ?
+             AND (LOWER(name) = LOWER(?)
+             OR LOWER(REPLACE(name, ' ', '-')) = LOWER(?))`,
+          [info.status, Math.floor(info.lastActivity / 1000), now, workspaceId, agentName, agentName]
         )
       }
     } catch (dbErr) {
@@ -445,7 +404,7 @@ async function performHealthCheck() {
     // On macOS capacity is col 4 ("85%"), on Linux use% is col 4 as well
     const pctField = parts.find(p => p.endsWith('%')) || '0%'
     const usagePercent = parseInt(pctField.replace('%', '') || '0')
-    
+
     health.checks.push({
       name: 'Disk Space',
       status: usagePercent < 90 ? 'healthy' : usagePercent < 95 ? 'warning' : 'critical',
@@ -515,10 +474,10 @@ async function getCapabilities() {
 
   let claudeSessions = 0
   try {
-    const db = getDatabase()
-    const row = db.prepare(
-      "SELECT COUNT(*) as c FROM claude_sessions WHERE is_active = 1"
-    ).get() as { c: number } | undefined
+    const row = (await query(
+      "SELECT COUNT(*) as c FROM claude_sessions WHERE is_active = 1",
+      []
+    )).rows[0] as { c: number } | undefined
     claudeSessions = row?.c ?? 0
   } catch {
     // claude_sessions table may not exist

@@ -5,7 +5,7 @@ import { config, ensureDirExists } from '@/lib/config'
 import { requireRole } from '@/lib/auth'
 import { getAllGatewaySessions } from '@/lib/sessions'
 import { logger } from '@/lib/logger'
-import { getDatabase } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { calculateTokenCost } from '@/lib/token-pricing'
 import { getProviderSubscriptionFlags } from '@/lib/provider-subscriptions'
 import { buildTaskCostReport, type TaskCostMetadata } from '@/lib/task-costs'
@@ -63,16 +63,15 @@ interface DbTokenUsageRow {
   created_at: number
 }
 
-function loadTokenDataFromDb(workspaceId: number, providerSubscriptions: Record<string, boolean>): TokenUsageRecord[] {
+async function loadTokenDataFromDb(workspaceId: number, providerSubscriptions: Record<string, boolean>): Promise<TokenUsageRecord[]> {
   try {
-    const db = getDatabase()
-    const rows = db.prepare(`
+    const rows = (await query(`
       SELECT id, model, session_id, input_tokens, output_tokens, task_id, workspace_id, created_at
       FROM token_usage
       WHERE workspace_id = ?
       ORDER BY created_at DESC, id DESC
       LIMIT 10000
-    `).all(workspaceId) as DbTokenUsageRow[]
+    `, [workspaceId])).rows as DbTokenUsageRow[]
 
     return rows.map((row) => {
       const totalTokens = row.input_tokens + row.output_tokens
@@ -161,7 +160,6 @@ async function loadTokenDataFromFile(workspaceId: number, providerSubscriptions:
       .filter((record): record is TokenUsageRecord => record !== null)
       .filter((record) => {
         if (record.workspaceId === workspaceId) return true
-        // Backward compatibility for pre-workspace records
         return workspaceId === 1 && (!record.workspaceId || record.workspaceId === 1)
       })
   } catch {
@@ -174,30 +172,28 @@ async function loadTokenDataFromFile(workspaceId: number, providerSubscriptions:
  */
 async function loadTokenData(workspaceId: number): Promise<TokenUsageRecord[]> {
   const providerSubscriptions = getProviderSubscriptionFlags()
-  const dbRecords = loadTokenDataFromDb(workspaceId, providerSubscriptions)
+  const dbRecords = await loadTokenDataFromDb(workspaceId, providerSubscriptions)
   const fileRecords = await loadTokenDataFromFile(workspaceId, providerSubscriptions)
   const combined = dedupeTokenRecords([...dbRecords, ...fileRecords]).sort((a, b) => b.timestamp - a.timestamp)
   if (combined.length > 0) {
     return combined
   }
 
-  // Final fallback: derive from in-memory sessions
   return deriveFromSessions(workspaceId, providerSubscriptions)
 }
 
 /**
  * Derive token usage records from OpenClaw session stores.
- * Each session has totalTokens, inputTokens, outputTokens, model, etc.
  */
 function deriveFromSessions(workspaceId: number, providerSubscriptions: Record<string, boolean>): TokenUsageRecord[] {
-  const sessions = getAllGatewaySessions(Infinity) // Get ALL sessions regardless of age
+  const sessions = getAllGatewaySessions(Infinity)
   const records: TokenUsageRecord[] = []
 
   for (const session of sessions) {
     const inputTokens = session.inputTokens || 0
     const outputTokens = session.outputTokens || 0
     const totalTokens = inputTokens + outputTokens
-    if (totalTokens <= 0 && !session.model) continue // Skip empty sessions
+    if (totalTokens <= 0 && !session.model) continue
     const cost = calculateTokenCost(session.model || '', inputTokens, outputTokens, { providerSubscriptions })
 
     records.push({
@@ -274,11 +270,10 @@ function filterByTimeframe(records: TokenUsageRecord[], timeframe: string): Toke
   return records.filter(record => record.timestamp >= cutoffTime)
 }
 
-function loadTaskMetadataById(workspaceId: number, taskIds: number[]): Record<number, TaskCostMetadata> {
+async function loadTaskMetadataById(workspaceId: number, taskIds: number[]): Promise<Record<number, TaskCostMetadata>> {
   if (taskIds.length === 0) return {}
-  const db = getDatabase()
   const placeholders = taskIds.map(() => '?').join(', ')
-  const rows = db.prepare(`
+  const rows = (await query(`
     SELECT
       t.id,
       t.title,
@@ -295,7 +290,7 @@ function loadTaskMetadataById(workspaceId: number, taskIds: number[]): Record<nu
       ON p.id = t.project_id AND p.workspace_id = t.workspace_id
     WHERE t.workspace_id = ?
       AND t.id IN (${placeholders})
-  `).all(workspaceId, ...taskIds) as TaskMetadataRow[]
+  `, [workspaceId, ...taskIds])).rows as TaskMetadataRow[]
 
   const out: Record<number, TaskCostMetadata> = {}
   for (const row of rows) {
@@ -305,7 +300,7 @@ function loadTaskMetadataById(workspaceId: number, taskIds: number[]): Record<nu
 }
 
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
@@ -351,7 +346,6 @@ export async function GET(request: NextRequest) {
         sessionStats[sessionId] = calculateStats(records)
       }
 
-      // Agent aggregation: extract agent name from sessionId (format: "agentName:chatType")
       const agentGroups = filteredData.reduce((acc, record) => {
         const agent = record.agentName || extractAgentName(record.sessionId)
         if (!acc[agent]) acc[agent] = []
@@ -392,7 +386,6 @@ export async function GET(request: NextRequest) {
       for (const [agent, records] of Object.entries(agentGroups)) {
         const stats = calculateStats(records)
 
-        // Per-agent model breakdown
         const modelGroups = records.reduce((acc, r) => {
           if (!acc[r.model]) acc[r.model] = []
           acc[r.model].push(r)
@@ -403,10 +396,8 @@ export async function GET(request: NextRequest) {
           models[model] = calculateStats(mrs)
         }
 
-        // Unique sessions
         const sessions = [...new Set(records.map(r => r.sessionId))]
 
-        // Daily timeline
         const dailyMap = records.reduce((acc, r) => {
           const date = new Date(r.timestamp).toISOString().split('T')[0]
           if (!acc[date]) acc[date] = { cost: 0, tokens: 0 }
@@ -436,7 +427,7 @@ export async function GET(request: NextRequest) {
           .filter((taskId): taskId is number => Number.isFinite(taskId) && Number(taskId) > 0)
           .map((taskId) => Number(taskId))
       )]
-      const taskMetadataById = loadTaskMetadataById(workspaceId, attributedTaskIds)
+      const taskMetadataById = await loadTaskMetadataById(workspaceId, attributedTaskIds)
       const report = buildTaskCostReport(
         filteredData.map((record) => ({
           model: record.model,
@@ -556,7 +547,7 @@ export async function GET(request: NextRequest) {
 }
 
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
@@ -578,10 +569,10 @@ export async function POST(request: NextRequest) {
 
     let validatedTaskId: number | null = null
     if (parsedTaskId) {
-      const db = getDatabase()
-      const taskRow = db.prepare(
-        'SELECT id FROM tasks WHERE id = ? AND workspace_id = ?'
-      ).get(parsedTaskId, workspaceId) as { id?: number } | undefined
+      const taskRow = (await query(
+        'SELECT id FROM tasks WHERE id = ? AND workspace_id = ?',
+        [parsedTaskId, workspaceId]
+      )).rows[0] as { id?: number } | undefined
       if (taskRow?.id) validatedTaskId = taskRow.id
     }
 
@@ -601,7 +592,6 @@ export async function POST(request: NextRequest) {
       duration,
     }
 
-    // Persist only manually posted usage records in the JSON file.
     const existingData = await loadTokenDataFromFile(workspaceId, providerSubscriptions)
     existingData.unshift(record)
 

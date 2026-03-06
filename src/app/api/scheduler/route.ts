@@ -6,10 +6,10 @@ import { getSchedulerStatus, triggerTask } from '@/lib/scheduler'
  * GET /api/scheduler - Get scheduler status
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-  return NextResponse.json({ tasks: getSchedulerStatus() })
+  return NextResponse.json({ tasks: await getSchedulerStatus() })
 }
 
 /**
@@ -17,12 +17,12 @@ export async function GET(request: NextRequest) {
  * Body: { task_id: 'auto_backup' | 'auto_cleanup' | 'agent_heartbeat' }
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const body = await request.json().catch(() => ({}))
   const taskId = typeof body?.task_id === 'string' ? body.task_id : ''
-  const allowedTaskIds = new Set(getSchedulerStatus().map((task) => task.id))
+  const allowedTaskIds = new Set((await getSchedulerStatus()).map((task) => task.id))
 
   if (!taskId || !allowedTaskIds.has(taskId)) {
     return NextResponse.json({

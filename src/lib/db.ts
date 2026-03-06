@@ -1,81 +1,33 @@
-import Database from 'better-sqlite3';
-import { dirname } from 'path';
-import { config, ensureDirExists } from './config';
-import { runMigrations } from './migrations';
-import { eventBus } from './event-bus';
-import { hashPassword } from './password';
-import { logger } from './logger';
-import { parseMentions as parseMentionTokens } from './mentions';
+import { query, withTransaction } from './postgres'
+import { runMigrations } from './migrations'
+import { eventBus } from './event-bus'
+import { hashPassword } from './password'
+import { logger } from './logger'
+import { parseMentions as parseMentionTokens } from './mentions'
 
-// Database file location
-const DB_PATH = config.dbPath;
+export { query } from './postgres'
 
-// Global database instance
-let db: Database.Database | null = null;
+// Lazy migration guard — runs once per process
+let _initialized = false
+let _initPromise: Promise<void> | null = null
 
-/**
- * Get or create database connection
- */
-export function getDatabase(): Database.Database {
-  if (!db) {
-    ensureDirExists(dirname(DB_PATH));
-    db = new Database(DB_PATH);
-    
-    // Enable WAL mode for better concurrent access
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('cache_size = 1000');
-    db.pragma('foreign_keys = ON');
-    
-    // Initialize schema if needed
-    initializeSchema();
-  }
-  
-  return db;
-}
-
-/**
- * Initialize database schema via migrations
- */
-let webhookListenerInitialized = false;
-
-function initializeSchema() {
-  if (!db) return;
-  try {
-    runMigrations(db);
-    seedAdminUserFromEnv(db);
-
-    // Initialize webhook event listener (once)
-    if (!webhookListenerInitialized) {
-      webhookListenerInitialized = true;
-      import('./webhooks').then(({ initWebhookListener }) => {
-        initWebhookListener();
-      }).catch(() => {
-        // Silent - webhooks are optional
-      });
-
-      // Start built-in scheduler for auto-backup and auto-cleanup.
-      // Avoid running background jobs during `next build` static generation.
+export async function ensureInitialized(): Promise<void> {
+  if (_initialized) return
+  if (!_initPromise) {
+    _initPromise = (async () => {
+      await runMigrations()
+      // Skip seeding during next build
       if (process.env.NEXT_PHASE !== 'phase-production-build') {
-        import('./scheduler').then(({ initScheduler }) => {
-          initScheduler();
-        }).catch(() => {
-          // Silent - scheduler is optional
-        });
+        await seedAdminUserFromEnv(process.env)
       }
-    }
-
-    logger.info('Database migrations applied successfully');
-  } catch (error) {
-    logger.error({ err: error }, 'Failed to apply database migrations');
-    throw error;
+      _initialized = true
+    })()
   }
+  return _initPromise
 }
 
 interface CountRow { count: number }
 
-// Known-insecure passwords that should never be used in production.
-// Includes the .env.example default and common placeholder values.
 const INSECURE_PASSWORDS = new Set([
   'admin',
   'password',
@@ -111,15 +63,15 @@ export function resolveSeedAuthPassword(env: NodeJS.ProcessEnv = process.env): s
   return env.AUTH_PASS || null
 }
 
-function seedAdminUserFromEnv(dbConn: Database.Database): void {
-  // Skip seeding during `next build` — env vars may not be available yet
-  if (process.env.NEXT_PHASE === 'phase-production-build') return
+async function seedAdminUserFromEnv(env: NodeJS.ProcessEnv): Promise<void> {
+  if (env.NEXT_PHASE === 'phase-production-build') return
 
-  const count = (dbConn.prepare('SELECT COUNT(*) as count FROM users').get() as CountRow).count
-  if (count > 0) return
+  const { rows } = await query<CountRow>('SELECT COUNT(*) as count FROM users')
+  const count = rows[0]?.count ?? 0
+  if (Number(count) > 0) return
 
-  const username = process.env.AUTH_USER || 'admin'
-  const password = resolveSeedAuthPassword()
+  const username = env.AUTH_USER || 'admin'
+  const password = resolveSeedAuthPassword(env)
 
   if (!password) {
     logger.warn(
@@ -140,22 +92,14 @@ function seedAdminUserFromEnv(dbConn: Database.Database): void {
 
   const displayName = username.charAt(0).toUpperCase() + username.slice(1)
 
-  dbConn.prepare(`
-    INSERT OR IGNORE INTO users (username, display_name, password_hash, role)
-    VALUES (?, ?, ?, ?)
-  `).run(username, displayName, hashPassword(password), 'admin')
+  await query(
+    `INSERT INTO users (username, display_name, password_hash, role)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT (username) DO NOTHING`,
+    [username, displayName, hashPassword(password), 'admin']
+  )
 
   logger.info(`Seeded admin user: ${username}`)
-}
-
-/**
- * Close database connection
- */
-export function closeDatabase() {
-  if (db) {
-    db.close();
-    db = null;
-  }
 }
 
 // Type definitions for database entities
@@ -184,8 +128,8 @@ export interface Task {
   feedback_notes?: string;
   retry_count?: number;
   completed_at?: number;
-  tags?: string; // JSON string
-  metadata?: string; // JSON string
+  tags?: string;
+  metadata?: string;
 }
 
 export interface Agent {
@@ -199,7 +143,7 @@ export interface Agent {
   last_activity?: string;
   created_at: number;
   updated_at: number;
-  config?: string; // JSON string
+  config?: string;
 }
 
 export interface Comment {
@@ -209,7 +153,7 @@ export interface Comment {
   content: string;
   created_at: number;
   parent_id?: number;
-  mentions?: string; // JSON string
+  mentions?: string;
 }
 
 export interface Activity {
@@ -219,7 +163,7 @@ export interface Activity {
   entity_id: number;
   actor: string;
   description: string;
-  data?: string; // JSON string
+  data?: string;
   created_at: number;
 }
 
@@ -230,7 +174,7 @@ export interface Message {
   to_agent?: string;
   content: string;
   message_type: string;
-  metadata?: string; // JSON string
+  metadata?: string;
   read_at?: number;
   created_at: number;
 }
@@ -296,12 +240,8 @@ export interface ProvisionEvent {
   created_at: number
 }
 
-// Database helper functions
 export const db_helpers = {
-  /**
-   * Log an activity to the activity stream
-   */
-  logActivity: (
+  logActivity: async (
     type: string,
     entity_type: string,
     entity_id: number,
@@ -310,16 +250,15 @@ export const db_helpers = {
     data?: any,
     workspaceId: number = 1
   ) => {
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      INSERT INTO activities (type, entity_type, entity_id, actor, description, data, workspace_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const result = stmt.run(type, entity_type, entity_id, actor, description, data ? JSON.stringify(data) : null, workspaceId);
+    const { rows } = await query(
+      `INSERT INTO activities (type, entity_type, entity_id, actor, description, data, workspace_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       RETURNING id`,
+      [type, entity_type, entity_id, actor, description, data ? JSON.stringify(data) : null, workspaceId]
+    )
 
     const activityPayload = {
-      id: result.lastInsertRowid,
+      id: rows[0]?.id,
       type,
       entity_type,
       entity_id,
@@ -328,16 +267,12 @@ export const db_helpers = {
       data: data || null,
       created_at: Math.floor(Date.now() / 1000),
       workspace_id: workspaceId,
-    };
+    }
 
-    // Broadcast to SSE clients (webhooks listen here too)
-    eventBus.broadcast('activity.created', activityPayload);
+    eventBus.broadcast('activity.created', activityPayload)
   },
 
-  /**
-   * Create notification for @mentions
-   */
-  createNotification: (
+  createNotification: async (
     recipient: string,
     type: string,
     title: string,
@@ -346,16 +281,15 @@ export const db_helpers = {
     source_id?: number,
     workspaceId: number = 1
   ) => {
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      INSERT INTO notifications (recipient, type, title, message, source_type, source_id, workspace_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const result = stmt.run(recipient, type, title, message, source_type, source_id, workspaceId);
+    const { rows } = await query(
+      `INSERT INTO notifications (recipient, type, title, message, source_type, source_id, workspace_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       RETURNING id`,
+      [recipient, type, title, message, source_type, source_id, workspaceId]
+    )
 
     const notificationPayload = {
-      id: result.lastInsertRowid,
+      id: rows[0]?.id,
       recipient,
       type,
       title,
@@ -364,39 +298,32 @@ export const db_helpers = {
       source_id: source_id || null,
       created_at: Math.floor(Date.now() / 1000),
       workspace_id: workspaceId,
-    };
+    }
 
-    // Broadcast to SSE clients (webhooks listen here too)
-    eventBus.broadcast('notification.created', notificationPayload);
+    eventBus.broadcast('notification.created', notificationPayload)
 
-    return result;
+    return rows[0]
   },
 
-  /**
-   * Parse @mentions from text
-   */
   parseMentions: (text: string): string[] => {
-    return parseMentionTokens(text);
+    return parseMentionTokens(text)
   },
 
-  /**
-   * Update agent status and last seen
-   */
-  updateAgentStatus: (agentName: string, status: Agent['status'], activity?: string, workspaceId: number = 1) => {
-    const db = getDatabase();
-    const now = Math.floor(Date.now() / 1000);
+  updateAgentStatus: async (agentName: string, status: Agent['status'], activity?: string, workspaceId: number = 1) => {
+    const now = Math.floor(Date.now() / 1000)
 
-    // Get agent ID before update
-    const agent = db.prepare('SELECT id FROM agents WHERE name = ? AND workspace_id = ?').get(agentName, workspaceId) as { id: number } | undefined;
+    const { rows: agentRows } = await query<{ id: number }>(
+      'SELECT id FROM agents WHERE name = ? AND workspace_id = ?',
+      [agentName, workspaceId]
+    )
+    const agent = agentRows[0]
 
-    const stmt = db.prepare(`
-      UPDATE agents
-      SET status = ?, last_seen = ?, last_activity = ?, updated_at = ?
-      WHERE name = ? AND workspace_id = ?
-    `);
-    stmt.run(status, now, activity, now, agentName, workspaceId);
+    await query(
+      `UPDATE agents SET status = ?, last_seen = ?, last_activity = ?, updated_at = ?
+       WHERE name = ? AND workspace_id = ?`,
+      [status, now, activity, now, agentName, workspaceId]
+    )
 
-    // Broadcast agent status change to SSE clients
     if (agent) {
       eventBus.broadcast('agent.status_changed', {
         id: agent.id,
@@ -404,89 +331,65 @@ export const db_helpers = {
         status,
         last_seen: now,
         last_activity: activity || null,
-      });
+      })
     }
 
-    // Log the status change
-    db_helpers.logActivity('agent_status_change', 'agent', agent?.id || 0, agentName, `Agent status changed to ${status}`, { status, activity }, workspaceId);
+    void db_helpers.logActivity(
+      'agent_status_change', 'agent', agent?.id || 0, agentName,
+      `Agent status changed to ${status}`, { status, activity }, workspaceId
+    )
   },
 
-  /**
-   * Get recent activities for feed
-   */
-  getRecentActivities: (limit: number = 50): Activity[] => {
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      SELECT * FROM activities 
-      ORDER BY created_at DESC 
-      LIMIT ?
-    `);
-    
-    return stmt.all(limit) as Activity[];
+  getRecentActivities: async (limit: number = 50): Promise<Activity[]> => {
+    const { rows } = await query<Activity>(
+      `SELECT * FROM activities ORDER BY created_at DESC LIMIT ?`,
+      [limit]
+    )
+    return rows
   },
 
-  /**
-   * Get unread notifications for recipient
-   */
-  getUnreadNotifications: (recipient: string, workspaceId: number = 1): Notification[] => {
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      SELECT * FROM notifications 
-      WHERE recipient = ? AND read_at IS NULL AND workspace_id = ?
-      ORDER BY created_at DESC
-    `);
-    
-    return stmt.all(recipient, workspaceId) as Notification[];
+  getUnreadNotifications: async (recipient: string, workspaceId: number = 1): Promise<Notification[]> => {
+    const { rows } = await query<Notification>(
+      `SELECT * FROM notifications
+       WHERE recipient = ? AND read_at IS NULL AND workspace_id = ?
+       ORDER BY created_at DESC`,
+      [recipient, workspaceId]
+    )
+    return rows
   },
 
-  /**
-   * Mark notification as read
-   */
-  markNotificationRead: (notificationId: number, workspaceId: number = 1) => {
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      UPDATE notifications 
-      SET read_at = ?
-      WHERE id = ? AND workspace_id = ?
-    `);
-    
-    stmt.run(Math.floor(Date.now() / 1000), notificationId, workspaceId);
+  markNotificationRead: async (notificationId: number, workspaceId: number = 1) => {
+    await query(
+      `UPDATE notifications SET read_at = ? WHERE id = ? AND workspace_id = ?`,
+      [Math.floor(Date.now() / 1000), notificationId, workspaceId]
+    )
   },
 
-  /**
-   * Ensure an agent is subscribed to a task
-   */
-  ensureTaskSubscription: (taskId: number, agentName: string, workspaceId: number = 1) => {
-    if (!agentName) return;
-    const db = getDatabase();
-    const stmt = db.prepare(`
-      INSERT OR IGNORE INTO task_subscriptions (task_id, agent_name)
-      SELECT t.id, ?
-      FROM tasks t
-      WHERE t.id = ? AND t.workspace_id = ?
-    `);
-    stmt.run(agentName, taskId, workspaceId);
+  ensureTaskSubscription: async (taskId: number, agentName: string, workspaceId: number = 1) => {
+    if (!agentName) return
+    await query(
+      `INSERT INTO task_subscriptions (task_id, agent_name)
+       SELECT t.id, ?
+       FROM tasks t
+       WHERE t.id = ? AND t.workspace_id = ?
+       ON CONFLICT (task_id, agent_name) DO NOTHING`,
+      [agentName, taskId, workspaceId]
+    )
   },
 
-  /**
-   * Get subscribers for a task
-   */
-  getTaskSubscribers: (taskId: number, workspaceId: number = 1): string[] => {
-    const db = getDatabase();
-    const rows = db.prepare(`
-      SELECT ts.agent_name
-      FROM task_subscriptions ts
-      JOIN tasks t ON t.id = ts.task_id
-      WHERE ts.task_id = ? AND t.workspace_id = ?
-    `).all(taskId, workspaceId) as Array<{ agent_name: string }>;
-    return rows.map((row) => row.agent_name);
+  getTaskSubscribers: async (taskId: number, workspaceId: number = 1): Promise<string[]> => {
+    const { rows } = await query<{ agent_name: string }>(
+      `SELECT ts.agent_name
+       FROM task_subscriptions ts
+       JOIN tasks t ON t.id = ts.task_id
+       WHERE ts.task_id = ? AND t.workspace_id = ?`,
+      [taskId, workspaceId]
+    )
+    return rows.map((row) => row.agent_name)
   }
-};
+}
 
-/**
- * Log a security/admin audit event
- */
-export function logAuditEvent(event: {
+export async function logAuditEvent(event: {
   action: string
   actor: string
   actor_id?: number
@@ -496,22 +399,21 @@ export function logAuditEvent(event: {
   ip_address?: string
   user_agent?: string
 }) {
-  const db = getDatabase()
-  db.prepare(`
-    INSERT INTO audit_log (action, actor, actor_id, target_type, target_id, detail, ip_address, user_agent)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    event.action,
-    event.actor,
-    event.actor_id ?? null,
-    event.target_type ?? null,
-    event.target_id ?? null,
-    event.detail ? JSON.stringify(event.detail) : null,
-    event.ip_address ?? null,
-    event.user_agent ?? null,
+  await query(
+    `INSERT INTO audit_log (action, actor, actor_id, target_type, target_id, detail, ip_address, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      event.action,
+      event.actor,
+      event.actor_id ?? null,
+      event.target_type ?? null,
+      event.target_id ?? null,
+      event.detail ? JSON.stringify(event.detail) : null,
+      event.ip_address ?? null,
+      event.user_agent ?? null,
+    ]
   )
 
-  // Broadcast audit events (webhooks listen here too)
   const securityEvents = ['login_failed', 'user_created', 'user_deleted', 'password_change']
   if (securityEvents.includes(event.action)) {
     eventBus.broadcast('audit.security', {
@@ -524,36 +426,29 @@ export function logAuditEvent(event: {
   }
 }
 
-export function appendProvisionEvent(event: {
+export async function appendProvisionEvent(event: {
   job_id: number
   level?: 'info' | 'warn' | 'error'
   step_key?: string
   message: string
   data?: any
 }) {
-  const db = getDatabase()
-  db.prepare(`
-    INSERT INTO provision_events (job_id, level, step_key, message, data)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(
-    event.job_id,
-    event.level || 'info',
-    event.step_key ?? null,
-    event.message,
-    event.data ? JSON.stringify(event.data) : null
+  await query(
+    `INSERT INTO provision_events (job_id, level, step_key, message, data)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      event.job_id,
+      event.level || 'info',
+      event.step_key ?? null,
+      event.message,
+      event.data ? JSON.stringify(event.data) : null,
+    ]
   )
 }
 
-// Initialize database on module load
-if (typeof window === 'undefined') { // Only run on server side
-  try {
-    getDatabase();
-  } catch (error) {
-    logger.error({ err: error }, 'Failed to initialize database');
-  }
+// Initialize on server side (non-blocking — runs migrations in background)
+if (typeof window === 'undefined' && process.env.NEXT_PHASE !== 'phase-production-build') {
+  ensureInitialized().catch((err) => {
+    logger.error({ err }, 'Failed to initialize database')
+  })
 }
-
-// Cleanup on process exit
-process.on('exit', closeDatabase);
-process.on('SIGINT', closeDatabase);
-process.on('SIGTERM', closeDatabase);

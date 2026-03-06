@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase, db_helpers } from '@/lib/db'
+import { db_helpers } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { requireRole } from '@/lib/auth'
 import { validateBody, createWorkflowSchema } from '@/lib/validation'
 import { mutationLimiter } from '@/lib/rate-limit'
@@ -25,15 +26,15 @@ export interface WorkflowTemplate {
  * GET /api/workflows - List all workflow templates
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
-    const templates = db
-      .prepare('SELECT * FROM workflow_templates WHERE workspace_id = ? ORDER BY use_count DESC, updated_at DESC')
-      .all(workspaceId) as WorkflowTemplate[]
+    const templates = (await query(
+      'SELECT * FROM workflow_templates WHERE workspace_id = ? ORDER BY use_count DESC, updated_at DESC',
+      [workspaceId]
+    )).rows as WorkflowTemplate[]
 
     const parsed = templates.map(t => ({
       ...t,
@@ -51,7 +52,7 @@ export async function GET(request: NextRequest) {
  * POST /api/workflows - Create a new workflow template
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -62,14 +63,14 @@ export async function POST(request: NextRequest) {
     if ('error' in result) return result.error
     const { name, description, model, task_prompt, timeout_seconds, agent_role, tags } = result.data
 
-    const db = getDatabase()
     const user = auth.user
     const workspaceId = auth.user.workspace_id ?? 1
 
-    const insertResult = db.prepare(`
+    const insertResult = await query(`
       INSERT INTO workflow_templates (name, description, model, task_prompt, timeout_seconds, agent_role, tags, created_by, workspace_id)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
+      RETURNING id
+    `, [
       name,
       description || null,
       model,
@@ -79,16 +80,19 @@ export async function POST(request: NextRequest) {
       JSON.stringify(tags),
       user?.username || 'system',
       workspaceId
-    )
+    ])
 
-    const template = db
-      .prepare('SELECT * FROM workflow_templates WHERE id = ? AND workspace_id = ?')
-      .get(insertResult.lastInsertRowid, workspaceId) as WorkflowTemplate
+    const newId = insertResult.rows[0].id
 
-    db_helpers.logActivity(
+    const template = (await query(
+      'SELECT * FROM workflow_templates WHERE id = ? AND workspace_id = ?',
+      [newId, workspaceId]
+    )).rows[0] as WorkflowTemplate
+
+    await db_helpers.logActivity(
       'workflow_created',
       'workflow',
-      Number(insertResult.lastInsertRowid),
+      newId,
       user?.username || 'system',
       `Created workflow template: ${name}`,
       undefined,
@@ -108,11 +112,10 @@ export async function POST(request: NextRequest) {
  * PUT /api/workflows - Update a workflow template
  */
 export async function PUT(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
     const body = await request.json()
     const { id, ...updates } = body
@@ -121,9 +124,10 @@ export async function PUT(request: NextRequest) {
       return NextResponse.json({ error: 'Template ID is required' }, { status: 400 })
     }
 
-    const existing = db
-      .prepare('SELECT * FROM workflow_templates WHERE id = ? AND workspace_id = ?')
-      .get(id, workspaceId) as WorkflowTemplate
+    const existing = (await query(
+      'SELECT * FROM workflow_templates WHERE id = ? AND workspace_id = ?',
+      [id, workspaceId]
+    )).rows[0] as WorkflowTemplate | undefined
     if (!existing) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 })
     }
@@ -139,7 +143,6 @@ export async function PUT(request: NextRequest) {
     if (updates.agent_role !== undefined) { fields.push('agent_role = ?'); params.push(updates.agent_role) }
     if (updates.tags !== undefined) { fields.push('tags = ?'); params.push(JSON.stringify(updates.tags)) }
 
-    // No explicit field updates = usage tracking call (from orchestration bar)
     if (fields.length === 0) {
       fields.push('use_count = use_count + 1')
       fields.push('last_used_at = ?')
@@ -150,11 +153,12 @@ export async function PUT(request: NextRequest) {
     params.push(Math.floor(Date.now() / 1000))
     params.push(id, workspaceId)
 
-    db.prepare(`UPDATE workflow_templates SET ${fields.join(', ')} WHERE id = ? AND workspace_id = ?`).run(...params)
+    await query(`UPDATE workflow_templates SET ${fields.join(', ')} WHERE id = ? AND workspace_id = ?`, params)
 
-    const updated = db
-      .prepare('SELECT * FROM workflow_templates WHERE id = ? AND workspace_id = ?')
-      .get(id, workspaceId) as WorkflowTemplate
+    const updated = (await query(
+      'SELECT * FROM workflow_templates WHERE id = ? AND workspace_id = ?',
+      [id, workspaceId]
+    )).rows[0] as WorkflowTemplate
     return NextResponse.json({ template: { ...updated, tags: updated.tags ? JSON.parse(updated.tags) : [] } })
   } catch (error) {
     logger.error({ err: error }, 'PUT /api/workflows error')
@@ -166,11 +170,10 @@ export async function PUT(request: NextRequest) {
  * DELETE /api/workflows - Delete a workflow template
  */
 export async function DELETE(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
     let body: any
     try { body = await request.json() } catch { return NextResponse.json({ error: 'Request body required' }, { status: 400 }) }
@@ -180,8 +183,11 @@ export async function DELETE(request: NextRequest) {
       return NextResponse.json({ error: 'Template ID is required' }, { status: 400 })
     }
 
-    const result = db.prepare('DELETE FROM workflow_templates WHERE id = ? AND workspace_id = ?').run(parseInt(id), workspaceId)
-    if (result.changes === 0) {
+    const result = await query(
+      'DELETE FROM workflow_templates WHERE id = ? AND workspace_id = ?',
+      [parseInt(id), workspaceId]
+    )
+    if ((result.rowCount ?? 0) === 0) {
       return NextResponse.json({ error: 'Template not found' }, { status: 404 })
     }
     return NextResponse.json({ success: true })

@@ -12,7 +12,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = mutationLimiter(request)
@@ -52,7 +52,7 @@ export async function POST(
       )
     }
 
-    db_helpers.logActivity(
+    await db_helpers.logActivity(
       'session_control',
       'session',
       0,

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { getDatabase, Message } from "@/lib/db"
+import { query, Message } from "@/lib/db"
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
 
@@ -8,11 +8,10 @@ import { logger } from '@/lib/logger'
  * Query params: limit, offset, since, agent
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const { searchParams } = new URL(request.url)
     const workspaceId = auth.user.workspace_id ?? 1
 
@@ -48,7 +47,7 @@ export async function GET(request: NextRequest) {
     messagesQuery += " ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?"
     messagesParams.push(limit, offset)
 
-    const messages = db.prepare(messagesQuery).all(...messagesParams) as Message[]
+    const messages = (await query(messagesQuery, messagesParams)).rows as Message[]
 
     // 2. Communication graph edges
     let graphQuery = `
@@ -69,7 +68,7 @@ export async function GET(request: NextRequest) {
     }
     graphQuery += " GROUP BY from_agent, to_agent ORDER BY message_count DESC"
 
-    const edges = db.prepare(graphQuery).all(...graphParams)
+    const edges = (await query(graphQuery, graphParams)).rows
 
     // 3. Per-agent sent/received stats
     const statsQuery = `
@@ -85,10 +84,10 @@ export async function GET(request: NextRequest) {
           AND from_agent NOT IN (${humanPlaceholders})
           AND to_agent NOT IN (${humanPlaceholders})
         GROUP BY to_agent
-      ) GROUP BY agent ORDER BY (sent + received) DESC
+      ) t GROUP BY agent ORDER BY (sent + received) DESC
     `
     const statsParams = [workspaceId, ...humanNames, ...humanNames, workspaceId, ...humanNames, ...humanNames]
-    const agentStats = db.prepare(statsQuery).all(...statsParams)
+    const agentStats = (await query(statsQuery, statsParams)).rows
 
     // 4. Total count
     let countQuery = `
@@ -107,7 +106,7 @@ export async function GET(request: NextRequest) {
       countQuery += " AND (from_agent = ? OR to_agent = ?)"
       countParams.push(agent, agent)
     }
-    const { total } = db.prepare(countQuery).get(...countParams) as { total: number }
+    const { total } = (await query(countQuery, countParams)).rows[0] as { total: number }
 
     let seededCountQuery = `
       SELECT COUNT(*) as seeded FROM messages
@@ -126,7 +125,7 @@ export async function GET(request: NextRequest) {
       seededCountQuery += " AND (from_agent = ? OR to_agent = ?)"
       seededParams.push(agent, agent)
     }
-    const { seeded } = db.prepare(seededCountQuery).get(...seededParams) as { seeded: number }
+    const { seeded } = (await query(seededCountQuery, seededParams)).rows[0] as { seeded: number }
 
     const seededCount = seeded || 0
     const liveCount = Math.max(0, total - seededCount)
@@ -142,7 +141,6 @@ export async function GET(request: NextRequest) {
         try {
           parsedMetadata = JSON.parse(msg.metadata)
         } catch {
-          // Keep endpoint resilient even if one legacy row has bad metadata
           parsedMetadata = null
         }
       }

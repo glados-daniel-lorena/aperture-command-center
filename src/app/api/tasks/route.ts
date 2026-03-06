@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getDatabase, Task, db_helpers } from '@/lib/db';
+import { Task, db_helpers } from '@/lib/db';
+import { query, withTransaction } from '@/lib/postgres';
 import { eventBus } from '@/lib/event-bus';
 import { requireRole } from '@/lib/auth';
 import { mutationLimiter } from '@/lib/rate-limit';
@@ -22,22 +23,22 @@ function mapTaskRow(task: any): Task & { tags: string[]; metadata: Record<string
   }
 }
 
-function resolveProjectId(db: ReturnType<typeof getDatabase>, workspaceId: number, requestedProjectId?: number): number {
+async function resolveProjectId(q: typeof query, workspaceId: number, requestedProjectId?: number): Promise<number> {
   if (typeof requestedProjectId === 'number' && Number.isFinite(requestedProjectId)) {
-    const project = db.prepare(`
+    const project = (await q(`
       SELECT id FROM projects
       WHERE id = ? AND workspace_id = ? AND status = 'active'
       LIMIT 1
-    `).get(requestedProjectId, workspaceId) as { id: number } | undefined
+    `, [requestedProjectId, workspaceId])).rows[0] as { id: number } | undefined
     if (project) return project.id
   }
 
-  const fallback = db.prepare(`
+  const fallback = (await q(`
     SELECT id FROM projects
     WHERE workspace_id = ? AND status = 'active'
     ORDER BY CASE WHEN slug = 'general' THEN 0 ELSE 1 END, id ASC
     LIMIT 1
-  `).get(workspaceId) as { id: number } | undefined
+  `, [workspaceId])).rows[0] as { id: number } | undefined
 
   if (!fallback) {
     throw new Error('No active project available in workspace')
@@ -45,13 +46,13 @@ function resolveProjectId(db: ReturnType<typeof getDatabase>, workspaceId: numbe
   return fallback.id
 }
 
-function hasAegisApproval(db: ReturnType<typeof getDatabase>, taskId: number, workspaceId: number): boolean {
-  const review = db.prepare(`
+async function hasAegisApproval(taskId: number, workspaceId: number): Promise<boolean> {
+  const review = (await query(`
     SELECT status FROM quality_reviews
     WHERE task_id = ? AND reviewer = 'aegis' AND workspace_id = ?
     ORDER BY created_at DESC
     LIMIT 1
-  `).get(taskId, workspaceId) as { status?: string } | undefined
+  `, [taskId, workspaceId])).rows[0] as { status?: string } | undefined
   return review?.status === 'approved'
 }
 
@@ -60,11 +61,10 @@ function hasAegisApproval(db: ReturnType<typeof getDatabase>, taskId: number, wo
  * Query params: status, assigned_to, priority, project_id, limit, offset
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer');
+  const auth = await requireRole(request, 'viewer');
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
   try {
-    const db = getDatabase();
     const workspaceId = auth.user.workspace_id;
     const { searchParams } = new URL(request.url);
 
@@ -75,9 +75,9 @@ export async function GET(request: NextRequest) {
     const projectIdParam = Number.parseInt(searchParams.get('project_id') || '', 10);
     const limit = Math.min(parseInt(searchParams.get('limit') || '50'), 200);
     const offset = parseInt(searchParams.get('offset') || '0');
-    
+
     // Build dynamic query
-    let query = `
+    let sql = `
       SELECT t.*, p.name as project_name, p.ticket_prefix as project_prefix
       FROM tasks t
       LEFT JOIN projects p
@@ -85,56 +85,55 @@ export async function GET(request: NextRequest) {
       WHERE t.workspace_id = ?
     `;
     const params: any[] = [workspaceId];
-    
+
     if (status) {
-      query += ' AND t.status = ?';
+      sql += ' AND t.status = ?';
       params.push(status);
     }
-    
+
     if (assigned_to) {
-      query += ' AND t.assigned_to = ?';
+      sql += ' AND t.assigned_to = ?';
       params.push(assigned_to);
     }
-    
+
     if (priority) {
-      query += ' AND t.priority = ?';
+      sql += ' AND t.priority = ?';
       params.push(priority);
     }
 
     if (Number.isFinite(projectIdParam)) {
-      query += ' AND t.project_id = ?';
+      sql += ' AND t.project_id = ?';
       params.push(projectIdParam);
     }
-    
-    query += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
+
+    sql += ' ORDER BY t.created_at DESC LIMIT ? OFFSET ?';
     params.push(limit, offset);
-    
-    const stmt = db.prepare(query);
-    const tasks = stmt.all(...params) as Task[];
-    
+
+    const tasks = (await query(sql, params)).rows as Task[];
+
     // Parse JSON fields
     const tasksWithParsedData = tasks.map(mapTaskRow);
-    
+
     // Get total count for pagination
-    let countQuery = 'SELECT COUNT(*) as total FROM tasks WHERE workspace_id = ?';
+    let countSql = 'SELECT COUNT(*) as total FROM tasks WHERE workspace_id = ?';
     const countParams: any[] = [workspaceId];
     if (status) {
-      countQuery += ' AND status = ?';
+      countSql += ' AND status = ?';
       countParams.push(status);
     }
     if (assigned_to) {
-      countQuery += ' AND assigned_to = ?';
+      countSql += ' AND assigned_to = ?';
       countParams.push(assigned_to);
     }
     if (priority) {
-      countQuery += ' AND priority = ?';
+      countSql += ' AND priority = ?';
       countParams.push(priority);
     }
     if (Number.isFinite(projectIdParam)) {
-      countQuery += ' AND project_id = ?';
+      countSql += ' AND project_id = ?';
       countParams.push(projectIdParam);
     }
-    const countRow = db.prepare(countQuery).get(...countParams) as { total: number };
+    const countRow = (await query(countSql, countParams)).rows[0] as { total: number };
 
     return NextResponse.json({ tasks: tasksWithParsedData, total: countRow.total, page: Math.floor(offset / limit) + 1, limit });
   } catch (error) {
@@ -147,14 +146,13 @@ export async function GET(request: NextRequest) {
  * POST /api/tasks - Create a new task
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator');
+  const auth = await requireRole(request, 'operator');
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
   const rateCheck = mutationLimiter(request);
   if (rateCheck) return rateCheck;
 
   try {
-    const db = getDatabase();
     const workspaceId = auth.user.workspace_id;
     const validated = await validateBody(request, createTaskSchema);
     if ('error' in validated) return validated.error;
@@ -183,15 +181,15 @@ export async function POST(request: NextRequest) {
       metadata = {}
     } = body;
     const normalizedStatus = normalizeTaskCreateStatus(status, assigned_to)
-    
+
     // Check for duplicate title
-    const existingTask = db.prepare('SELECT id FROM tasks WHERE title = ? AND workspace_id = ?').get(title, workspaceId);
+    const existingTask = (await query('SELECT id FROM tasks WHERE title = ? AND workspace_id = ?', [title, workspaceId])).rows[0];
     if (existingTask) {
       return NextResponse.json({ error: 'Task with this title already exists' }, { status: 409 });
     }
-    
+
     const now = Math.floor(Date.now() / 1000);
-    const mentionResolution = resolveMentionRecipients(description || '', db, workspaceId);
+    const mentionResolution = await resolveMentionRecipients(description || '', workspaceId);
     if (mentionResolution.unresolved.length > 0) {
       return NextResponse.json({
         error: `Unknown mentions: ${mentionResolution.unresolved.map((m) => `@${m}`).join(', ')}`,
@@ -201,29 +199,28 @@ export async function POST(request: NextRequest) {
 
     const resolvedCompletedAt = completed_at ?? (normalizedStatus === 'done' ? now : null)
 
-    const createTaskTx = db.transaction(() => {
-      const resolvedProjectId = resolveProjectId(db, workspaceId, project_id)
-      db.prepare(`
+    const taskId = await withTransaction(async (txQuery) => {
+      const resolvedProjectId = await resolveProjectId(txQuery, workspaceId, project_id)
+      await txQuery(`
         UPDATE projects
-        SET ticket_counter = ticket_counter + 1, updated_at = unixepoch()
+        SET ticket_counter = ticket_counter + 1, updated_at = EXTRACT(EPOCH FROM NOW())::INTEGER
         WHERE id = ? AND workspace_id = ?
-      `).run(resolvedProjectId, workspaceId)
-      const row = db.prepare(`
+      `, [resolvedProjectId, workspaceId])
+      const row = (await txQuery(`
         SELECT ticket_counter FROM projects
         WHERE id = ? AND workspace_id = ?
-      `).get(resolvedProjectId, workspaceId) as { ticket_counter: number } | undefined
+      `, [resolvedProjectId, workspaceId])).rows[0] as { ticket_counter: number } | undefined
       if (!row || !row.ticket_counter) throw new Error('Failed to allocate project ticket number')
 
-      const insertStmt = db.prepare(`
+      const result = await txQuery(`
         INSERT INTO tasks (
           title, description, status, priority, project_id, project_ticket_no, assigned_to, created_by,
           created_at, updated_at, due_date, estimated_hours, actual_hours,
           outcome, error_message, resolution, feedback_rating, feedback_notes, retry_count, completed_at,
           tags, metadata, workspace_id
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
-
-      const dbResult = insertStmt.run(
+        RETURNING id
+      `, [
         title,
         description,
         normalizedStatus,
@@ -246,15 +243,13 @@ export async function POST(request: NextRequest) {
         resolvedCompletedAt,
         JSON.stringify(tags),
         JSON.stringify(metadata),
-        workspaceId
-      )
-      return Number(dbResult.lastInsertRowid)
+        workspaceId,
+      ])
+      return result.rows[0].id as number
     })
 
-    const taskId = createTaskTx()
-    
     // Log activity
-    db_helpers.logActivity('task_created', 'task', taskId, actor, `Created task: ${title}`, {
+    await db_helpers.logActivity('task_created', 'task', taskId, actor, `Created task: ${title}`, {
       title,
       status: normalizedStatus,
       priority,
@@ -263,13 +258,13 @@ export async function POST(request: NextRequest) {
     }, workspaceId);
 
     if (actor) {
-      db_helpers.ensureTaskSubscription(taskId, actor, workspaceId)
+      await db_helpers.ensureTaskSubscription(taskId, actor, workspaceId)
     }
 
     for (const recipient of mentionResolution.recipients) {
-      db_helpers.ensureTaskSubscription(taskId, recipient, workspaceId);
+      await db_helpers.ensureTaskSubscription(taskId, recipient, workspaceId);
       if (recipient === actor) continue;
-      db_helpers.createNotification(
+      await db_helpers.createNotification(
         recipient,
         'mention',
         'You were mentioned in a task description',
@@ -282,8 +277,8 @@ export async function POST(request: NextRequest) {
 
     // Create notification if assigned
     if (assigned_to) {
-      db_helpers.ensureTaskSubscription(taskId, assigned_to, workspaceId)
-      db_helpers.createNotification(
+      await db_helpers.ensureTaskSubscription(taskId, assigned_to, workspaceId)
+      await db_helpers.createNotification(
         assigned_to,
         'assignment',
         'Task Assigned',
@@ -293,15 +288,15 @@ export async function POST(request: NextRequest) {
         workspaceId
       );
     }
-    
+
     // Fetch the created task
-    const createdTask = db.prepare(`
+    const createdTask = (await query(`
       SELECT t.*, p.name as project_name, p.ticket_prefix as project_prefix
       FROM tasks t
       LEFT JOIN projects p
         ON p.id = t.project_id AND p.workspace_id = t.workspace_id
       WHERE t.id = ? AND t.workspace_id = ?
-    `).get(taskId, workspaceId) as Task;
+    `, [taskId, workspaceId])).rows[0] as Task;
     const parsedTask = mapTaskRow(createdTask);
 
     // Broadcast to SSE clients
@@ -318,65 +313,68 @@ export async function POST(request: NextRequest) {
  * PUT /api/tasks - Update multiple tasks (for drag-and-drop status changes)
  */
 export async function PUT(request: NextRequest) {
-  const auth = requireRole(request, 'operator');
+  const auth = await requireRole(request, 'operator');
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status });
 
   const rateCheck = mutationLimiter(request);
   if (rateCheck) return rateCheck;
 
   try {
-    const db = getDatabase();
     const workspaceId = auth.user.workspace_id;
     const validated = await validateBody(request, bulkUpdateTaskStatusSchema);
     if ('error' in validated) return validated.error;
     const { tasks } = validated.data;
 
     const now = Math.floor(Date.now() / 1000);
-
-    const updateStmt = db.prepare(`
-      UPDATE tasks
-      SET status = ?, updated_at = ?
-      WHERE id = ? AND workspace_id = ?
-    `);
-    const updateDoneStmt = db.prepare(`
-      UPDATE tasks
-      SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?)
-      WHERE id = ? AND workspace_id = ?
-    `);
-
     const actor = auth.user.username
 
-    const transaction = db.transaction((tasksToUpdate: any[]) => {
-      for (const task of tasksToUpdate) {
-        const oldTask = db.prepare('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?').get(task.id, workspaceId) as Task;
+    const activityLogs: Array<{ taskId: number; oldStatus: string; newStatus: string }> = []
+
+    await withTransaction(async (txQuery) => {
+      for (const task of tasks) {
+        const oldTask = (await txQuery('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?', [task.id, workspaceId])).rows[0] as Task;
         if (!oldTask) continue;
 
-        if (task.status === 'done' && !hasAegisApproval(db, task.id, workspaceId)) {
-          throw new Error(`Aegis approval required for task ${task.id}`)
-        }
-
         if (task.status === 'done') {
-          updateDoneStmt.run(task.status, now, now, task.id, workspaceId);
+          const review = (await txQuery(`
+            SELECT status FROM quality_reviews
+            WHERE task_id = ? AND reviewer = 'aegis' AND workspace_id = ?
+            ORDER BY created_at DESC LIMIT 1
+          `, [task.id, workspaceId])).rows[0] as { status?: string } | undefined
+          if (review?.status !== 'approved') {
+            throw new Error(`Aegis approval required for task ${task.id}`)
+          }
+          await txQuery(`
+            UPDATE tasks
+            SET status = ?, updated_at = ?, completed_at = COALESCE(completed_at, ?)
+            WHERE id = ? AND workspace_id = ?
+          `, [task.status, now, now, task.id, workspaceId]);
         } else {
-          updateStmt.run(task.status, now, task.id, workspaceId);
+          await txQuery(`
+            UPDATE tasks
+            SET status = ?, updated_at = ?
+            WHERE id = ? AND workspace_id = ?
+          `, [task.status, now, task.id, workspaceId]);
         }
 
-        // Log status change if different
-        if (oldTask && oldTask.status !== task.status) {
-          db_helpers.logActivity(
-            'task_updated',
-            'task',
-            task.id,
-            actor,
-            `Task moved from ${oldTask.status} to ${task.status}`,
-            { oldStatus: oldTask.status, newStatus: task.status },
-            workspaceId
-          );
+        if (oldTask.status !== task.status) {
+          activityLogs.push({ taskId: task.id, oldStatus: oldTask.status, newStatus: task.status })
         }
       }
     });
-    
-    transaction(tasks);
+
+    // Log activities after transaction
+    for (const { taskId, oldStatus, newStatus } of activityLogs) {
+      await db_helpers.logActivity(
+        'task_updated',
+        'task',
+        taskId,
+        actor,
+        `Task moved from ${oldStatus} to ${newStatus}`,
+        { oldStatus, newStatus },
+        workspaceId
+      );
+    }
 
     // Broadcast status changes to SSE clients
     for (const task of tasks) {

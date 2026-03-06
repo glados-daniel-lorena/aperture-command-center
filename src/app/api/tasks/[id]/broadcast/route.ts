@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase, db_helpers } from '@/lib/db'
+import { db_helpers } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { runOpenClaw } from '@/lib/command'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
@@ -8,7 +9,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
@@ -26,24 +27,25 @@ export async function POST(
       return NextResponse.json({ error: 'Message is required' }, { status: 400 })
     }
 
-    const db = getDatabase()
-    const task = db
-      .prepare('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?')
-      .get(taskId, workspaceId) as any
+    const task = (await query('SELECT * FROM tasks WHERE id = ? AND workspace_id = ?', [taskId, workspaceId])).rows[0] as any
     if (!task) {
       return NextResponse.json({ error: 'Task not found' }, { status: 404 })
     }
 
-    const subscribers = new Set(db_helpers.getTaskSubscribers(taskId, workspaceId))
+    const subscriberList = await db_helpers.getTaskSubscribers(taskId, workspaceId)
+    const subscribers = new Set(subscriberList)
     subscribers.delete(author)
 
     if (subscribers.size === 0) {
       return NextResponse.json({ sent: 0, skipped: 0 })
     }
 
-    const agents = db
-      .prepare('SELECT name, session_key FROM agents WHERE workspace_id = ? AND name IN (' + Array.from(subscribers).map(() => '?').join(',') + ')')
-      .all(workspaceId, ...Array.from(subscribers)) as Array<{ name: string; session_key?: string }>
+    const subscriberNames = Array.from(subscribers)
+    const placeholders = subscriberNames.map(() => '?').join(',')
+    const agents = (await query(
+      `SELECT name, session_key FROM agents WHERE workspace_id = ? AND name IN (${placeholders})`,
+      [workspaceId, ...subscriberNames]
+    )).rows as Array<{ name: string; session_key?: string }>
 
     const results = await Promise.allSettled(
       agents.map(async (agent) => {
@@ -59,7 +61,7 @@ export async function POST(
           ],
           { timeoutMs: 10000 }
         )
-        db_helpers.createNotification(
+        await db_helpers.createNotification(
           agent.name,
           'message',
           'Task Broadcast',
@@ -79,7 +81,7 @@ export async function POST(
       else skipped++
     }
 
-    db_helpers.logActivity(
+    await db_helpers.logActivity(
       'task_broadcast',
       'task',
       taskId,

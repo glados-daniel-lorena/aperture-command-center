@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { requireRole } from "@/lib/auth"
-import { getDatabase } from "@/lib/db"
+import { query } from "@/lib/postgres"
 
 interface GatewayEntry {
   id: number
@@ -65,19 +65,10 @@ function isBlockedUrl(urlStr: string): boolean {
  * Probes gateways from the server where loopback addresses are reachable.
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, "viewer")
+  const auth = await requireRole(request, "viewer")
   if ("error" in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
-  const db = getDatabase()
-  const gateways = db.prepare("SELECT * FROM gateways ORDER BY is_primary DESC, name ASC").all() as GatewayEntry[]
-
-  // Prepare update statements once (avoids N+1)
-  const updateOnlineStmt = db.prepare(
-    "UPDATE gateways SET status = ?, latency = ?, last_seen = (unixepoch()), updated_at = (unixepoch()) WHERE id = ?"
-  )
-  const updateOfflineStmt = db.prepare(
-    "UPDATE gateways SET status = ?, latency = NULL, updated_at = (unixepoch()) WHERE id = ?"
-  )
+  const gateways = (await query("SELECT * FROM gateways ORDER BY is_primary DESC, name ASC")).rows as GatewayEntry[]
 
   const results: HealthResult[] = []
 
@@ -106,7 +97,10 @@ export async function POST(request: NextRequest) {
         ? 'OpenClaw 2026.3.2+ defaults tools.profile=messaging; Mission Control should enforce coding profile when spawning.'
         : undefined
 
-      updateOnlineStmt.run(status, latency, gw.id)
+      await query(
+        "UPDATE gateways SET status = ?, latency = ?, last_seen = EXTRACT(EPOCH FROM NOW())::INTEGER, updated_at = EXTRACT(EPOCH FROM NOW())::INTEGER WHERE id = ?",
+        [status, latency, gw.id]
+      )
 
       results.push({
         id: gw.id,
@@ -119,7 +113,10 @@ export async function POST(request: NextRequest) {
         compatibility_warning: compatibilityWarning,
       })
     } catch (err: any) {
-      updateOfflineStmt.run("offline", gw.id)
+      await query(
+        "UPDATE gateways SET status = ?, latency = NULL, updated_at = EXTRACT(EPOCH FROM NOW())::INTEGER WHERE id = ?",
+        ["offline", gw.id]
+      )
 
       results.push({
         id: gw.id,

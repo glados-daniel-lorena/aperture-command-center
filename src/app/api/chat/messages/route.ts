@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getDatabase, db_helpers, Message } from '@/lib/db'
+import { query, db_helpers, Message } from '@/lib/db'
 import { runOpenClaw } from '@/lib/command'
 import { getAllGatewaySessions } from '@/lib/sessions'
 import { eventBus } from '@/lib/event-bus'
@@ -31,8 +31,7 @@ function parseGatewayJson(raw: string): any | null {
   }
 }
 
-function createChatReply(
-  db: ReturnType<typeof getDatabase>,
+async function createChatReply(
   workspaceId: number,
   conversationId: string,
   fromAgent: string,
@@ -41,29 +40,26 @@ function createChatReply(
   messageType: 'text' | 'status' = 'status',
   metadata: Record<string, any> | null = null
 ) {
-  const replyInsert = db
-    .prepare(`
-      INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(
-      conversationId,
-      fromAgent,
-      toAgent,
-      content,
-      messageType,
-      metadata ? JSON.stringify(metadata) : null,
-      workspaceId
-    )
+  const { rows: [inserted] } = await query(`
+    INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    RETURNING *
+  `, [
+    conversationId,
+    fromAgent,
+    toAgent,
+    content,
+    messageType,
+    metadata ? JSON.stringify(metadata) : null,
+    workspaceId
+  ])
 
-  const row = db
-    .prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?')
-    .get(replyInsert.lastInsertRowid, workspaceId) as Message
-
-  eventBus.broadcast('chat.message', {
-    ...row,
-    metadata: row.metadata ? JSON.parse(row.metadata) : null,
-  })
+  if (inserted) {
+    eventBus.broadcast('chat.message', {
+      ...inserted,
+      metadata: inserted.metadata ? JSON.parse(inserted.metadata) : null,
+    })
+  }
 }
 
 function extractReplyText(waitPayload: any): string | null {
@@ -99,11 +95,10 @@ function extractReplyText(waitPayload: any): string | null {
  * Query params: conversation_id, from_agent, to_agent, limit, offset, since
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'viewer')
+  const auth = await requireRole(request, 'viewer')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
     const { searchParams } = new URL(request.url)
 
@@ -114,33 +109,33 @@ export async function GET(request: NextRequest) {
     const offset = parseInt(searchParams.get('offset') || '0')
     const since = searchParams.get('since')
 
-    let query = 'SELECT * FROM messages WHERE workspace_id = ?'
+    let sql = 'SELECT * FROM messages WHERE workspace_id = ?'
     const params: any[] = [workspaceId]
 
     if (conversation_id) {
-      query += ' AND conversation_id = ?'
+      sql += ' AND conversation_id = ?'
       params.push(conversation_id)
     }
 
     if (from_agent) {
-      query += ' AND from_agent = ?'
+      sql += ' AND from_agent = ?'
       params.push(from_agent)
     }
 
     if (to_agent) {
-      query += ' AND to_agent = ?'
+      sql += ' AND to_agent = ?'
       params.push(to_agent)
     }
 
     if (since) {
-      query += ' AND created_at > ?'
+      sql += ' AND created_at > ?'
       params.push(parseInt(since))
     }
 
-    query += ' ORDER BY created_at ASC LIMIT ? OFFSET ?'
+    sql += ' ORDER BY created_at ASC LIMIT ? OFFSET ?'
     params.push(limit, offset)
 
-    const messages = db.prepare(query).all(...params) as Message[]
+    const messages = (await query(sql, params)).rows as Message[]
 
     const parsed = messages.map((msg) => ({
       ...msg,
@@ -148,25 +143,25 @@ export async function GET(request: NextRequest) {
     }))
 
     // Get total count for pagination
-    let countQuery = 'SELECT COUNT(*) as total FROM messages WHERE workspace_id = ?'
+    let countSql = 'SELECT COUNT(*) as total FROM messages WHERE workspace_id = ?'
     const countParams: any[] = [workspaceId]
     if (conversation_id) {
-      countQuery += ' AND conversation_id = ?'
+      countSql += ' AND conversation_id = ?'
       countParams.push(conversation_id)
     }
     if (from_agent) {
-      countQuery += ' AND from_agent = ?'
+      countSql += ' AND from_agent = ?'
       countParams.push(from_agent)
     }
     if (to_agent) {
-      countQuery += ' AND to_agent = ?'
+      countSql += ' AND to_agent = ?'
       countParams.push(to_agent)
     }
     if (since) {
-      countQuery += ' AND created_at > ?'
+      countSql += ' AND created_at > ?'
       countParams.push(parseInt(since))
     }
-    const countRow = db.prepare(countQuery).get(...countParams) as { total: number }
+    const countRow = (await query(countSql, countParams)).rows[0] as { total: number }
 
     return NextResponse.json({ messages: parsed, total: countRow.total, page: Math.floor(offset / limit) + 1, limit })
   } catch (error) {
@@ -181,11 +176,10 @@ export async function GET(request: NextRequest) {
  * Sender identity is always resolved server-side from authenticated user.
  */
 export async function POST(request: NextRequest) {
-  const auth = requireRole(request, 'operator')
+  const auth = await requireRole(request, 'operator')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   try {
-    const db = getDatabase()
     const workspaceId = auth.user.workspace_id ?? 1
     const body = await request.json()
 
@@ -203,12 +197,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const stmt = db.prepare(`
+    const { rows: [insertedMsg] } = await query(`
       INSERT INTO messages (conversation_id, from_agent, to_agent, content, message_type, metadata, workspace_id)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    const result = stmt.run(
+      RETURNING id
+    `, [
       conversation_id,
       from,
       to,
@@ -216,9 +209,9 @@ export async function POST(request: NextRequest) {
       message_type,
       metadata ? JSON.stringify(metadata) : null,
       workspaceId
-    )
+    ])
 
-    const messageId = result.lastInsertRowid as number
+    const messageId = insertedMsg.id as number
 
     let forwardInfo: ForwardInfo | null = null
 
@@ -249,9 +242,10 @@ export async function POST(request: NextRequest) {
       if (body.forward) {
         forwardInfo = { attempted: true, delivered: false }
 
-        const agent = db
-          .prepare('SELECT * FROM agents WHERE lower(name) = lower(?) AND workspace_id = ?')
-          .get(to, workspaceId) as any
+        const agent = (await query(
+          'SELECT * FROM agents WHERE lower(name) = lower(?) AND workspace_id = ?',
+          [to, workspaceId]
+        )).rows[0] as any
 
         let sessionKey: string | null = agent?.session_key || null
 
@@ -283,19 +277,17 @@ export async function POST(request: NextRequest) {
         if (!sessionKey && !openclawAgentId) {
           forwardInfo.reason = 'no_active_session'
 
-          // For coordinator messages, emit an immediate visible status reply
           if (typeof conversation_id === 'string' && conversation_id.startsWith('coord:')) {
             try {
-                createChatReply(
-                  db,
-                  workspaceId,
-                  conversation_id,
-                  COORDINATOR_AGENT,
-                  from,
-                  'I received your message, but my live coordinator session is offline right now. Start/restore the coordinator session and retry.',
-                  'status',
-                  { status: 'offline', reason: 'no_active_session' }
-                )
+              await createChatReply(
+                workspaceId,
+                conversation_id,
+                COORDINATOR_AGENT,
+                from,
+                'I received your message, but my live coordinator session is offline right now. Start/restore the coordinator session and retry.',
+                'status',
+                { status: 'offline', reason: 'no_active_session' }
+              )
             } catch (e) {
               logger.error({ err: e }, 'Failed to create offline status reply')
             }
@@ -330,8 +322,6 @@ export async function POST(request: NextRequest) {
               forwardInfo.runId = acceptedPayload.runId
             }
           } catch (err) {
-            // OpenClaw may return accepted JSON on stdout but still emit a late stderr warning.
-            // Treat accepted runs as successful delivery.
             const maybeStdout = String((err as any)?.stdout || '')
             const acceptedPayload = parseGatewayJson(maybeStdout)
             if (maybeStdout.includes('"status": "accepted"') || maybeStdout.includes('"status":"accepted"')) {
@@ -344,11 +334,9 @@ export async function POST(request: NextRequest) {
               forwardInfo.reason = 'gateway_send_failed'
               logger.error({ err }, 'Failed to forward message via gateway')
 
-              // For coordinator messages, emit visible status when send fails
               if (typeof conversation_id === 'string' && conversation_id.startsWith('coord:')) {
                 try {
-                  createChatReply(
-                    db,
+                  await createChatReply(
                     workspaceId,
                     conversation_id,
                     COORDINATOR_AGENT,
@@ -364,15 +352,14 @@ export async function POST(request: NextRequest) {
             }
           }
 
-          // Coordinator mode should always show visible coordinator feedback in thread.
+          // Coordinator mode feedback
           if (
             typeof conversation_id === 'string' &&
             conversation_id.startsWith('coord:') &&
             forwardInfo.delivered
           ) {
             try {
-              createChatReply(
-                db,
+              await createChatReply(
                 workspaceId,
                 conversation_id,
                 COORDINATOR_AGENT,
@@ -385,7 +372,6 @@ export async function POST(request: NextRequest) {
               logger.error({ err: e }, 'Failed to create accepted status reply')
             }
 
-            // Best effort: wait briefly and surface completion/error feedback.
             if (forwardInfo.runId) {
               try {
                 const waitResult = await runOpenClaw(
@@ -410,8 +396,7 @@ export async function POST(request: NextRequest) {
                     typeof waitPayload?.error === 'string'
                       ? waitPayload.error
                       : 'Unknown runtime error'
-                  createChatReply(
-                    db,
+                  await createChatReply(
                     workspaceId,
                     conversation_id,
                     COORDINATOR_AGENT,
@@ -421,8 +406,7 @@ export async function POST(request: NextRequest) {
                     { status: 'error', runId: forwardInfo.runId }
                   )
                 } else if (waitStatus === 'timeout') {
-                  createChatReply(
-                    db,
+                  await createChatReply(
                     workspaceId,
                     conversation_id,
                     COORDINATOR_AGENT,
@@ -434,8 +418,7 @@ export async function POST(request: NextRequest) {
                 } else {
                   const replyText = extractReplyText(waitPayload)
                   if (replyText) {
-                    createChatReply(
-                      db,
+                    await createChatReply(
                       workspaceId,
                       conversation_id,
                       COORDINATOR_AGENT,
@@ -445,8 +428,7 @@ export async function POST(request: NextRequest) {
                       { status: waitStatus || 'completed', runId: forwardInfo.runId }
                     )
                   } else {
-                    createChatReply(
-                      db,
+                    await createChatReply(
                       workspaceId,
                       conversation_id,
                       COORDINATOR_AGENT,
@@ -466,8 +448,7 @@ export async function POST(request: NextRequest) {
                     ? waitPayload.error
                     : (maybeWaitStderr || maybeWaitStdout || 'Unable to read completion status from coordinator runtime.').trim()
 
-                createChatReply(
-                  db,
+                await createChatReply(
                   workspaceId,
                   conversation_id,
                   COORDINATOR_AGENT,
@@ -483,7 +464,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const created = db.prepare('SELECT * FROM messages WHERE id = ? AND workspace_id = ?').get(messageId, workspaceId) as Message
+    const created = (await query(
+      'SELECT * FROM messages WHERE id = ? AND workspace_id = ?',
+      [messageId, workspaceId]
+    )).rows[0] as Message
+
     const parsedMessage = {
       ...created,
       metadata: created.metadata ? JSON.parse(created.metadata) : null

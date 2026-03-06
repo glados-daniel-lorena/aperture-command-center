@@ -15,7 +15,7 @@
 import { readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { config } from './config'
-import { getDatabase } from './db'
+import { query } from './postgres'
 import { logger } from './logger'
 
 // Rough per-token pricing (USD) for cost estimation
@@ -251,49 +251,45 @@ export async function syncClaudeSessions(): Promise<{ ok: boolean; message: stri
       return { ok: true, message: 'No Claude sessions found' }
     }
 
-    const db = getDatabase()
     const now = Math.floor(Date.now() / 1000)
 
-    const upsert = db.prepare(`
-      INSERT INTO claude_sessions (
-        session_id, project_slug, project_path, model, git_branch,
-        user_messages, assistant_messages, tool_uses,
-        input_tokens, output_tokens, estimated_cost,
-        first_message_at, last_message_at, last_user_prompt,
-        is_active, scanned_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        model = excluded.model,
-        git_branch = excluded.git_branch,
-        user_messages = excluded.user_messages,
-        assistant_messages = excluded.assistant_messages,
-        tool_uses = excluded.tool_uses,
-        input_tokens = excluded.input_tokens,
-        output_tokens = excluded.output_tokens,
-        estimated_cost = excluded.estimated_cost,
-        last_message_at = excluded.last_message_at,
-        last_user_prompt = excluded.last_user_prompt,
-        is_active = excluded.is_active,
-        scanned_at = excluded.scanned_at,
-        updated_at = excluded.updated_at
-    `)
+    // Mark all sessions inactive before scanning
+    await query('UPDATE claude_sessions SET is_active = 0')
 
     let upserted = 0
-    db.transaction(() => {
-      // Mark all sessions inactive before scanning
-      db.prepare('UPDATE claude_sessions SET is_active = 0').run()
-
-      for (const s of sessions) {
-        upsert.run(
+    for (const s of sessions) {
+      await query(
+        `INSERT INTO claude_sessions (
+           session_id, project_slug, project_path, model, git_branch,
+           user_messages, assistant_messages, tool_uses,
+           input_tokens, output_tokens, estimated_cost,
+           first_message_at, last_message_at, last_user_prompt,
+           is_active, scanned_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (session_id) DO UPDATE SET
+           model = EXCLUDED.model,
+           git_branch = EXCLUDED.git_branch,
+           user_messages = EXCLUDED.user_messages,
+           assistant_messages = EXCLUDED.assistant_messages,
+           tool_uses = EXCLUDED.tool_uses,
+           input_tokens = EXCLUDED.input_tokens,
+           output_tokens = EXCLUDED.output_tokens,
+           estimated_cost = EXCLUDED.estimated_cost,
+           last_message_at = EXCLUDED.last_message_at,
+           last_user_prompt = EXCLUDED.last_user_prompt,
+           is_active = EXCLUDED.is_active,
+           scanned_at = EXCLUDED.scanned_at,
+           updated_at = EXCLUDED.updated_at`,
+        [
           s.sessionId, s.projectSlug, s.projectPath, s.model, s.gitBranch,
           s.userMessages, s.assistantMessages, s.toolUses,
           s.inputTokens, s.outputTokens, s.estimatedCost,
           s.firstMessageAt, s.lastMessageAt, s.lastUserPrompt,
           s.isActive ? 1 : 0, now, now,
-        )
-        upserted++
-      }
-    })()
+        ]
+      )
+      upserted++
+    }
 
     const active = sessions.filter(s => s.isActive).length
     return {

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireRole } from '@/lib/auth'
-import { getDatabase, logAuditEvent } from '@/lib/db'
+import { logAuditEvent } from '@/lib/db'
+import { query } from '@/lib/postgres'
 import { heavyLimiter } from '@/lib/rate-limit'
 
 /**
@@ -8,7 +9,7 @@ import { heavyLimiter } from '@/lib/rate-limit'
  * Admin-only data export endpoint.
  */
 export async function GET(request: NextRequest) {
-  const auth = requireRole(request, 'admin')
+  const auth = await requireRole(request, 'admin')
   if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
 
   const rateCheck = heavyLimiter(request)
@@ -27,7 +28,6 @@ export async function GET(request: NextRequest) {
     )
   }
 
-  const db = getDatabase()
   const workspaceId = auth.user.workspace_id ?? 1
   const conditions: string[] = []
   const params: any[] = []
@@ -53,31 +53,32 @@ export async function GET(request: NextRequest) {
 
   switch (type) {
     case 'audit': {
-      rows = db.prepare(`SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ?`).all(...params, limit)
+      rows = (await query(`SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ?`, [...params, limit])).rows
       headers = ['id', 'action', 'actor', 'actor_id', 'target_type', 'target_id', 'detail', 'ip_address', 'user_agent', 'created_at']
       filename = 'audit-log'
       break
     }
     case 'tasks': {
-      conditions.unshift('workspace_id = ?')
-      params.unshift(workspaceId)
-      const scopedWhere = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-      rows = db.prepare(`SELECT * FROM tasks ${scopedWhere} ORDER BY created_at DESC LIMIT ?`).all(...params, limit)
+      const taskConditions = [`workspace_id = ?`, ...conditions]
+      const taskParams = [workspaceId, ...params]
+      const taskWhere = `WHERE ${taskConditions.join(' AND ')}`
+      rows = (await query(`SELECT * FROM tasks ${taskWhere} ORDER BY created_at DESC LIMIT ?`, [...taskParams, limit])).rows
       headers = ['id', 'title', 'description', 'status', 'priority', 'assigned_to', 'created_by', 'created_at', 'updated_at', 'due_date', 'estimated_hours', 'actual_hours', 'tags']
       filename = 'tasks'
       break
     }
     case 'activities': {
-      conditions.unshift('workspace_id = ?')
-      params.unshift(workspaceId)
-      const scopedWhere = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
-      rows = db.prepare(`SELECT * FROM activities ${scopedWhere} ORDER BY created_at DESC LIMIT ?`).all(...params, limit)
+      const actConditions = [`workspace_id = ?`, ...conditions]
+      const actParams = [workspaceId, ...params]
+      const actWhere = `WHERE ${actConditions.join(' AND ')}`
+      rows = (await query(`SELECT * FROM activities ${actWhere} ORDER BY created_at DESC LIMIT ?`, [...actParams, limit])).rows
       headers = ['id', 'type', 'entity_type', 'entity_id', 'actor', 'description', 'data', 'created_at']
       filename = 'activities'
       break
     }
     case 'pipelines': {
-      rows = db.prepare(`SELECT pr.*, wp.name as pipeline_name FROM pipeline_runs pr LEFT JOIN workflow_pipelines wp ON pr.pipeline_id = wp.id ${where ? where.replace('created_at', 'pr.created_at') : ''} ORDER BY pr.created_at DESC LIMIT ?`).all(...params, limit)
+      const pipWhere = where ? where.replace('created_at', 'pr.created_at') : ''
+      rows = (await query(`SELECT pr.*, wp.name as pipeline_name FROM pipeline_runs pr LEFT JOIN workflow_pipelines wp ON pr.pipeline_id = wp.id ${pipWhere} ORDER BY pr.created_at DESC LIMIT ?`, [...params, limit])).rows
       headers = ['id', 'pipeline_id', 'pipeline_name', 'status', 'current_step', 'steps_snapshot', 'started_at', 'completed_at', 'triggered_by', 'created_at']
       filename = 'pipeline-runs'
       break
@@ -86,7 +87,7 @@ export async function GET(request: NextRequest) {
 
   // Log the export
   const ipAddress = request.headers.get('x-forwarded-for') || request.headers.get('x-real-ip') || 'unknown'
-  logAuditEvent({
+  void logAuditEvent({
     action: 'data_export',
     actor: auth.user.username,
     actor_id: auth.user.id,
