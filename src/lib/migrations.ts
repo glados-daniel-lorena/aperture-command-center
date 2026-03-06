@@ -922,6 +922,32 @@ const migrations: Migration[] = [
         CREATE INDEX IF NOT EXISTS idx_escalations_created_at ON escalations(created_at)
       `)
     }
+  },
+  {
+    id: '030_phase2_agent_terminal',
+    up: async (q) => {
+      // escalations: add session_key and agent_id for response routing
+      if (!(await columnExists(q, 'escalations', 'session_key')))
+        await q(`ALTER TABLE escalations ADD COLUMN session_key TEXT`)
+      if (!(await columnExists(q, 'escalations', 'agent_id')))
+        await q(`ALTER TABLE escalations ADD COLUMN agent_id TEXT`)
+      if (!(await columnExists(q, 'escalations', 'delivery_status')))
+        await q(`ALTER TABLE escalations ADD COLUMN delivery_status TEXT`)
+
+      // agents: add live task/ticket tracking columns
+      if (!(await columnExists(q, 'agents', 'current_task')))
+        await q(`ALTER TABLE agents ADD COLUMN current_task TEXT`)
+      if (!(await columnExists(q, 'agents', 'current_ticket')))
+        await q(`ALTER TABLE agents ADD COLUMN current_ticket TEXT`)
+      if (!(await columnExists(q, 'agents', 'last_active')))
+        await q(`ALTER TABLE agents ADD COLUMN last_active INTEGER`)
+
+      await execStmts(q, `
+        CREATE INDEX IF NOT EXISTS idx_escalations_session_key ON escalations(session_key);
+        CREATE INDEX IF NOT EXISTS idx_escalations_agent_id ON escalations(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_agents_last_active ON agents(last_active)
+      `)
+    }
   }
 ]
 
