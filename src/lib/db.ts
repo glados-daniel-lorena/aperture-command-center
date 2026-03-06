@@ -144,6 +144,7 @@ export interface Agent {
   created_at: number;
   updated_at: number;
   config?: string;
+  avatar_url?: string;
 }
 
 export interface Comment {

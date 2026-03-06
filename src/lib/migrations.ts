@@ -879,7 +879,26 @@ const migrations: Migration[] = [
     }
   },
   {
-    id: '028_escalations',
+    id: '028_agent_avatar_url',
+    up: async (q) => {
+      if (!(await columnExists(q, 'agents', 'avatar_url')))
+        await q(`ALTER TABLE agents ADD COLUMN avatar_url TEXT`)
+
+      // Seed existing agents with their Discord avatar URLs
+      const avatars: Record<string, string> = {
+        'GLaDOS': 'https://cdn.discordapp.com/avatars/1479306655014588560/d5eb7cdb0cf3a585f788ec4f4a10522e.png?size=256',
+        'P-Body': 'https://cdn.discordapp.com/avatars/1479554972377944286/ac6ac7d5462d36a8530a33d6429839c8.png?size=256',
+        'Atlas': 'https://cdn.discordapp.com/avatars/1479568371304497243/f7984a6f4686751e5ff9224fbfd609d6.png?size=256',
+        'Wheatley': 'https://cdn.discordapp.com/avatars/1479568994171097339/7ab0b8c0ebf2796cc0eab9d16f7a53ee.png?size=256',
+        'Cave Johnson': 'https://cdn.discordapp.com/avatars/1479569855656231126/17a9924784981cf8543703f618a7e0dd.png?size=256',
+      }
+      for (const [name, url] of Object.entries(avatars)) {
+        await q(`UPDATE agents SET avatar_url = $1 WHERE name = $2 AND (avatar_url IS NULL OR avatar_url = '')`, [url, name])
+      }
+    }
+  },
+  {
+    id: '029_escalations',
     up: async (q) => {
       await execStmts(q, `
         CREATE TABLE IF NOT EXISTS escalations (

@@ -30,6 +30,7 @@ interface Agent {
   created_at: number
   updated_at: number
   config?: any
+  avatar_url?: string
   taskStats?: {
     total: number
     assigned: number
@@ -368,7 +369,7 @@ export function AgentSquadPanelPhase3() {
                 {/* Agent Header */}
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-2 min-w-0">
-                    <AgentAvatar name={agent.name} size="md" />
+                    <AgentAvatar name={agent.name} size="md" avatarUrl={agent.avatar_url} />
                     <div className="min-w-0">
                       <h3 className="font-semibold text-foreground text-lg truncate">{agent.name}</h3>
                       <p className="text-muted-foreground text-sm truncate">{agent.role}</p>
@@ -696,7 +697,7 @@ function AgentDetailModalPhase3({
         <div className="p-6 border-b border-border bg-gradient-to-r from-surface-1 via-card to-surface-1">
           <div className="flex justify-between items-start gap-4">
             <div className="flex items-start gap-3 min-w-0">
-              <AgentAvatar name={agent.name} size="md" />
+              <AgentAvatar name={agent.name} size="md" avatarUrl={agent.avatar_url} />
               <div className="min-w-0">
                 <h3 className="text-2xl font-bold text-foreground leading-tight truncate">{agent.name}</h3>
                 <p className="text-muted-foreground mt-0.5 truncate">{agent.role}</p>

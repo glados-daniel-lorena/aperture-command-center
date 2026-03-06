@@ -130,7 +130,8 @@ export async function POST(request: NextRequest) {
       gateway_config,
       write_to_gateway,
       provision_openclaw_workspace,
-      openclaw_workspace_path
+      openclaw_workspace_path,
+      avatar_url
     } = body;
 
     const openclawId = (openclaw_id || name || 'agent')
@@ -194,8 +195,8 @@ export async function POST(request: NextRequest) {
     const insertResult = await query(`
       INSERT INTO agents (
         name, role, session_key, soul_content, status,
-        created_at, updated_at, config, workspace_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        created_at, updated_at, config, workspace_id, avatar_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       RETURNING id
     `, [
       name,
@@ -206,7 +207,8 @@ export async function POST(request: NextRequest) {
       now,
       now,
       JSON.stringify(finalConfig),
-      workspaceId
+      workspaceId,
+      avatar_url || null
     ]);
 
     const agentId = insertResult.rows[0].id as number;
@@ -287,7 +289,7 @@ export async function PUT(request: NextRequest) {
     const body = await request.json();
 
     if (body.name) {
-      const { name, status, last_activity, config, session_key, soul_content, role } = body;
+      const { name, status, last_activity, config, session_key, soul_content, role, avatar_url } = body;
 
       const agent = (await query(
         'SELECT * FROM agents WHERE name = ? AND workspace_id = ?',
@@ -332,6 +334,11 @@ export async function PUT(request: NextRequest) {
       if (role !== undefined) {
         fieldsToUpdate.push('role = ?');
         params.push(role);
+      }
+
+      if (avatar_url !== undefined) {
+        fieldsToUpdate.push('avatar_url = ?');
+        params.push(avatar_url);
       }
 
       fieldsToUpdate.push('updated_at = ?');
