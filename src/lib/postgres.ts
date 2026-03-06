@@ -38,7 +38,10 @@ export async function query<T = Record<string, any>>(
 ): Promise<QueryResult<T>> {
   const pgSql = toPgSql(sql)
   const sqlFn = getSql()
-  const result = (await (sqlFn as any)(pgSql, params, { fullResults: true })) as any
+  // Neon serverless v1.x: use sql.query() for conventional function calls
+  // (tagged template sql`...` is the default, but we need parameterized calls)
+  const queryFn = (sqlFn as any).query ?? sqlFn
+  const result = (await queryFn(pgSql, params, { fullResults: true })) as any
   return {
     rows: (result.rows ?? result) as T[],
     rowCount: result.rowCount ?? result.rows?.length ?? 0,
