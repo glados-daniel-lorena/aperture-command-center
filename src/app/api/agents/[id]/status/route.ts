@@ -9,8 +9,16 @@ type AgentStatus = typeof VALID_STATUSES[number]
 /** Check x-api-key against AGENT_API_KEY env var */
 function checkAgentApiKey(request: NextRequest): boolean {
   const agentKey = (process.env.AGENT_API_KEY || '').trim()
-  if (!agentKey) return false
   const provided = (request.headers.get('x-api-key') || '').trim()
+  logger.info({
+    hasEnvKey: !!agentKey,
+    envKeyLen: agentKey.length,
+    providedLen: provided.length,
+    envKeyPrefix: agentKey.substring(0, 12),
+    providedPrefix: provided.substring(0, 12),
+    match: provided.length > 0 && provided === agentKey,
+  }, 'AGENT_API_KEY auth check')
+  if (!agentKey) return false
   return provided.length > 0 && provided === agentKey
 }
 

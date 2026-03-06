@@ -84,7 +84,7 @@ export async function GET(request: NextRequest) {
           AND from_agent NOT IN (${humanPlaceholders})
           AND to_agent NOT IN (${humanPlaceholders})
         GROUP BY to_agent
-      ) t GROUP BY agent ORDER BY (sent + received) DESC
+      ) t GROUP BY agent ORDER BY (SUM(sent) + SUM(received)) DESC
     `
     const statsParams = [workspaceId, ...humanNames, ...humanNames, workspaceId, ...humanNames, ...humanNames]
     const agentStats = (await query(statsQuery, statsParams)).rows
