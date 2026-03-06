@@ -256,9 +256,27 @@ export function TerminalPanel() {
         {/* Agent grid */}
         <div className="flex-1 overflow-y-auto p-5">
           {loading ? (
-            <div className="flex items-center justify-center py-20">
-              <div className="w-6 h-6 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-              <span className="ml-3 text-sm text-muted-foreground">Loading agents...</span>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="bg-card border border-border rounded-xl p-4 flex flex-col gap-3 animate-pulse">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-secondary shrink-0" />
+                    <div className="flex-1 space-y-1.5">
+                      <div className="h-3 bg-secondary rounded w-24" />
+                      <div className="h-2.5 bg-secondary/60 rounded w-16" />
+                    </div>
+                  </div>
+                  <div className="space-y-1.5">
+                    <div className="h-2 bg-secondary/60 rounded w-20" />
+                    <div className="h-3 bg-secondary rounded w-full" />
+                    <div className="h-3 bg-secondary/60 rounded w-3/4" />
+                  </div>
+                  <div className="flex justify-between">
+                    <div className="h-4 bg-secondary rounded w-14" />
+                    <div className="h-2.5 bg-secondary/40 rounded w-12" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : agents.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 text-center">
