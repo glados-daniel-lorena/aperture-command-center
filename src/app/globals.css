@@ -4,77 +4,78 @@
 
 @layer base {
   :root {
-    /* oklch-based color system for perceptual uniformity */
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
+    /* Aperture Science — light mode (clinical white) */
+    --background: 220 15% 97%;
+    --foreground: 220 15% 8%;
     --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
+    --card-foreground: 220 15% 8%;
     --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
+    --popover-foreground: 220 15% 8%;
+    --primary: 33 95% 50%;
+    --primary-foreground: 0 0% 5%;
+    --secondary: 220 12% 92%;
+    --secondary-foreground: 220 15% 15%;
+    --muted: 220 12% 92%;
+    --muted-foreground: 220 8% 45%;
+    --accent: 220 12% 92%;
+    --accent-foreground: 220 15% 8%;
+    --destructive: 0 84.2% 55%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.625rem;
+    --border: 220 10% 85%;
+    --input: 220 10% 85%;
+    --ring: 33 95% 50%;
+    --radius: 0.5rem;
 
     /* Semantic status colors */
-    --success: 142 71% 45%;
+    --success: 142 71% 38%;
     --success-foreground: 0 0% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 0 0% 9%;
-    --info: 217 91% 60%;
+    --warning: 33 95% 50%;
+    --warning-foreground: 0 0% 5%;
+    --info: 201 100% 35%;
     --info-foreground: 0 0% 98%;
 
     /* Surface hierarchy */
-    --surface-0: 0 0% 100%;
-    --surface-1: 240 5% 96%;
-    --surface-2: 240 6% 93%;
-    --surface-3: 240 5% 88%;
+    --surface-0: 220 15% 97%;
+    --surface-1: 220 12% 94%;
+    --surface-2: 220 10% 90%;
+    --surface-3: 220 8% 85%;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 95%;
-    --card: 240 10% 5.5%;
-    --card-foreground: 0 0% 95%;
-    --popover: 240 10% 5.5%;
-    --popover-foreground: 0 0% 95%;
-    --primary: 210 100% 52%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 240 5% 12%;
-    --secondary-foreground: 0 0% 95%;
-    --muted: 240 5% 15%;
-    --muted-foreground: 240 5% 55%;
-    --accent: 240 5% 15%;
-    --accent-foreground: 0 0% 95%;
-    --destructive: 0 63% 31%;
+    /* Aperture Science — dark mode (primary) */
+    --background: 220 18% 5%;
+    --foreground: 0 0% 92%;
+    --card: 220 15% 8%;
+    --card-foreground: 0 0% 92%;
+    --popover: 220 15% 8%;
+    --popover-foreground: 0 0% 92%;
+    --primary: 33 95% 55%;
+    --primary-foreground: 0 0% 5%;
+    --secondary: 220 12% 13%;
+    --secondary-foreground: 0 0% 92%;
+    --muted: 220 12% 16%;
+    --muted-foreground: 220 8% 52%;
+    --accent: 220 12% 16%;
+    --accent-foreground: 0 0% 92%;
+    --destructive: 0 63% 35%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 4% 16%;
-    --input: 240 4% 16%;
-    --ring: 210 100% 52%;
+    --border: 220 10% 18%;
+    --input: 220 10% 18%;
+    --ring: 33 95% 55%;
 
-    /* Dark mode status */
-    --success: 142 71% 45%;
+    /* Aperture status colors */
+    --success: 142 60% 40%;
     --success-foreground: 0 0% 98%;
-    --warning: 38 92% 50%;
-    --warning-foreground: 0 0% 9%;
-    --info: 217 91% 60%;
+    --warning: 33 95% 55%;
+    --warning-foreground: 0 0% 5%;
+    --info: 201 100% 36%;
     --info-foreground: 0 0% 98%;
 
     /* Dark surface hierarchy */
-    --surface-0: 240 10% 3.9%;
-    --surface-1: 240 8% 6%;
-    --surface-2: 240 6% 9%;
-    --surface-3: 240 5% 13%;
+    --surface-0: 220 18% 5%;
+    --surface-1: 220 15% 8%;
+    --surface-2: 220 12% 11%;
+    --surface-3: 220 10% 15%;
   }
 }
 

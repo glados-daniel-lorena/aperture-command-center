@@ -10,12 +10,12 @@ export const viewport: Viewport = {
 }
 
 export const metadata: Metadata = {
-  title: 'Mission Control',
-  description: 'OpenClaw Agent Orchestration Dashboard',
+  title: 'Aperture Command Center',
+  description: 'Aperture Laboratories — Agent Orchestration Dashboard',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'Mission Control',
+    title: 'Aperture Command Center',
   },
 }
 

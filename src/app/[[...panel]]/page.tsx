@@ -135,11 +135,17 @@ export default function Home() {
       <div className="flex items-center justify-center min-h-screen">
         <div className="flex flex-col items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center">
-            <span className="text-primary-foreground font-bold text-sm">MC</span>
+            <svg viewBox="0 0 24 24" fill="none" className="w-6 h-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="12" cy="12" r="2.5" />
+              <line x1="12" y1="3" x2="12" y2="9.5" />
+              <line x1="19.5" y1="16.5" x2="14" y2="13.25" />
+              <line x1="4.5" y1="16.5" x2="10" y2="13.25" />
+            </svg>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-            <span className="text-sm text-muted-foreground">Loading Mission Control...</span>
+            <span className="text-sm text-muted-foreground font-mono">Initializing testing environment...</span>
           </div>
         </div>
       </div>

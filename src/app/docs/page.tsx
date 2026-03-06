@@ -18,7 +18,7 @@ export default function DocsPage() {
             clientKey: 'curl',
           },
           metaData: {
-            title: 'Mission Control API Docs',
+            title: 'Aperture Command Center API Docs',
           },
         }}
       />

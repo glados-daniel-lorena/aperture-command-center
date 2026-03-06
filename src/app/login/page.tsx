@@ -101,11 +101,18 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center mb-8">
-          <div className="w-12 h-12 rounded-xl bg-primary flex items-center justify-center mb-3">
-            <span className="text-primary-foreground font-bold text-lg">MC</span>
+          <div className="w-14 h-14 rounded-xl bg-primary flex items-center justify-center mb-4">
+            <svg viewBox="0 0 24 24" fill="none" className="w-8 h-8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="12" cy="12" r="2.5" />
+              <line x1="12" y1="3" x2="12" y2="9.5" />
+              <line x1="19.5" y1="16.5" x2="14" y2="13.25" />
+              <line x1="4.5" y1="16.5" x2="10" y2="13.25" />
+            </svg>
           </div>
-          <h1 className="text-xl font-semibold text-foreground">Mission Control</h1>
-          <p className="text-sm text-muted-foreground mt-1">Sign in to continue</p>
+          <p className="text-2xs font-mono tracking-[0.2em] text-muted-foreground uppercase mb-1">Aperture Laboratories</p>
+          <h1 className="text-xl font-semibold text-foreground">Aperture Command Center</h1>
+          <p className="text-sm text-muted-foreground mt-1">The Enrichment Center is pleased to have you.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -177,7 +184,7 @@ export default function LoginPage() {
         </div>
         {googleClientId && !googleReady && <p className="text-center text-xs text-muted-foreground mt-2">Loading Google Sign-In...</p>}
 
-        <p className="text-center text-xs text-muted-foreground mt-6">OpenClaw Agent Orchestration</p>
+        <p className="text-center text-xs text-muted-foreground mt-6 font-mono">Testing in progress. Please remain calm.</p>
       </div>
     </div>
   )

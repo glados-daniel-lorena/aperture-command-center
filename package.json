@@ -1,7 +1,7 @@
 {
-  "name": "mission-control",
+  "name": "aperture-command-center",
   "version": "1.3.0",
-  "description": "OpenClaw Mission Control — open-source agent orchestration dashboard",
+  "description": "Aperture Command Center — agent orchestration dashboard by Aperture Laboratories",
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port ${PORT:-3000}",
     "build": "next build",

@@ -187,7 +187,7 @@ export function AgentSquadPanelPhase3() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: `🤖 **Wake Up Call**\n\nAgent ${agentName}, you have been manually woken up.\nCheck Mission Control for any pending tasks or notifications.\n\n⏰ ${new Date().toLocaleString()}`
+          message: `🤖 **Wake Up Call**\n\nAgent ${agentName}, you have been manually woken up.\nCheck Aperture Command Center for any pending tasks or notifications.\n\n⏰ ${new Date().toLocaleString()}`
         })
       })
 
@@ -333,7 +333,7 @@ export function AgentSquadPanelPhase3() {
               </svg>
             </div>
             <p className="text-sm font-medium">No agents found</p>
-            <p className="text-xs mt-1">Add your first agent to get started</p>
+            <p className="text-xs mt-1">The Enrichment Center is ready to deploy test subjects.</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

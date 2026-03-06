@@ -102,10 +102,10 @@ export function NavRail() {
         {/* Header: Logo + toggle */}
         <div className={`flex items-center shrink-0 ${sidebarExpanded ? 'px-3 py-3 gap-2.5' : 'flex-col py-3 gap-2'}`}>
           <div className="w-9 h-9 rounded-lg bg-primary flex items-center justify-center shrink-0">
-            <span className="text-primary-foreground font-bold text-xs">MC</span>
+            <ApertureLogo />
           </div>
           {sidebarExpanded && (
-            <span className="text-sm font-semibold text-foreground truncate flex-1">Mission Control</span>
+            <span className="text-sm font-semibold text-foreground truncate flex-1">Aperture Command Center</span>
           )}
           <button
             onClick={toggleSidebar}
@@ -409,6 +409,19 @@ function MobileBottomSheet({ open, onClose, activeTab, navigateToPanel }: {
         </div>
       </div>
     </div>
+  )
+}
+
+// Aperture Science logo mark
+function ApertureLogo() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="2.5" />
+      <line x1="12" y1="3" x2="12" y2="9.5" />
+      <line x1="19.5" y1="16.5" x2="14" y2="13.25" />
+      <line x1="4.5" y1="16.5" x2="10" y2="13.25" />
+    </svg>
   )
 }
 
