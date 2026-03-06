@@ -333,6 +333,25 @@ export async function getUserFromRequest(request: Request): Promise<User | null>
     }
   }
 
+  // Also accept AGENT_API_KEY — used by autonomous agents (Atlas, P-Body, etc.)
+  const agentApiKey = (process.env.AGENT_API_KEY || '').trim()
+  if (agentApiKey && safeCompare(apiKey, agentApiKey)) {
+    return {
+      id: 0,
+      username: 'agent-api',
+      display_name: 'Agent API Access',
+      role: 'operator',
+      workspace_id: await getDefaultWorkspaceId(),
+      created_at: 0,
+      updated_at: 0,
+      last_login_at: null,
+      agent_name: agentName,
+      principal_type: 'agent_api_key',
+      auth_scopes: ['operator'],
+      agent_id: null,
+    }
+  }
+
   return null
 }
 
