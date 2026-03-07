@@ -115,12 +115,14 @@ export function proxy(request: NextRequest) {
   // API routes: accept session cookie OR API key
   if (pathname.startsWith('/api/')) {
     const configuredApiKey = (process.env.API_KEY || '').trim()
+    const agentApiKey = (process.env.AGENT_API_KEY || '').trim()
     const apiKey = extractApiKeyFromRequest(request)
     const hasValidApiKey = Boolean(configuredApiKey && apiKey && safeCompare(apiKey, configuredApiKey))
+    const hasValidAgentApiKey = Boolean(agentApiKey && apiKey && safeCompare(apiKey, agentApiKey))
     // Dedicated agent API keys are validated in route auth against DB.
     // Proxy only permits them to pass through to avoid coupling middleware to DB access.
     const hasAgentApiKeyCandidate = apiKey.startsWith('mca_')
-    if (sessionToken || hasValidApiKey || hasAgentApiKeyCandidate) {
+    if (sessionToken || hasValidApiKey || hasValidAgentApiKey || hasAgentApiKeyCandidate) {
       return applySecurityHeaders(NextResponse.next())
     }
 
