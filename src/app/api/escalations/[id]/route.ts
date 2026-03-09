@@ -3,16 +3,17 @@ import { query } from '@/lib/postgres'
 import { ensureInitialized } from '@/lib/db'
 import { requireRole } from '@/lib/auth'
 import { logger } from '@/lib/logger'
+import { wakeAgentWithResponse } from '@/lib/gateway'
 
 /**
  * PUT /api/escalations/[id]
  * Respond to or resolve an escalation.
  * Body: { response?, status? } — status: 'responded' | 'resolved'
  *
- * Delivery model: poll-based.
- * Session injection via gateway is not possible (sessions_send is internal only).
- * Agents poll GET /api/escalations?agent_id=X&status=responded on each cron run.
- * delivery_status is always 'pending_poll' after a response is saved.
+ * Delivery model: immediate cron wake-up.
+ * When Daniel responds, the gateway creates an "at" cron job firing in 30s
+ * that injects the response directly into the agent's isolated session.
+ * Falls back to poll-based delivery if the gateway call fails (agent cold / tunnel down).
  */
 export async function PUT(
   request: NextRequest,
@@ -76,9 +77,34 @@ export async function PUT(
       return NextResponse.json({ error: 'Nothing to update' }, { status: 400 })
     }
 
-    // Delivery is poll-based — agent picks up response on next cron run
-    const deliveryStatus = response !== undefined ? 'pending_poll' : escalation.delivery_status
+    // Attempt immediate wake-up via gateway cron at-job (fires in 30s)
+    let deliveryStatus: 'waking' | 'pending_poll' | 'no_session' = 'no_session'
+    let deliveryMessage = 'Status updated.'
+
     if (response !== undefined) {
+      if (escalation.agent_id) {
+        const wakeMessage =
+          `[ESCALATION RESPONSE from Daniel] ${response}\n\n` +
+          `Escalation ID: ${escalationId} | Title: "${escalation.title}"\n` +
+          `Resume your task. Mark the escalation resolved when done: ` +
+          `PATCH https://aperture-command-center-silk.vercel.app/api/escalations/${escalationId} ` +
+          `with { "status": "resolved" } and x-api-key header.`
+
+        try {
+          await wakeAgentWithResponse(escalation.agent_id, wakeMessage)
+          deliveryStatus = 'waking'
+          deliveryMessage = `${escalation.agent_name} is waking up — cron job fires in 30 seconds.`
+          logger.info({ escalationId, agentId: escalation.agent_id }, 'Agent wake cron created')
+        } catch (err: any) {
+          deliveryStatus = 'pending_poll'
+          deliveryMessage = `Gateway unreachable — ${escalation.agent_name} will pick up response on next scheduled cron run.`
+          logger.warn({ err, escalationId }, 'Wake cron failed — falling back to poll delivery')
+        }
+      } else {
+        deliveryStatus = 'pending_poll'
+        deliveryMessage = `No agent_id on escalation — response saved, agent will poll on next cron run.`
+      }
+
       setParts.push(' delivery_status = ?')
       updateParams.push(deliveryStatus)
     }
@@ -91,10 +117,8 @@ export async function PUT(
     return NextResponse.json({
       escalation: rows[0],
       delivery: {
-        status: deliveryStatus ?? 'no_session',
-        message: response !== undefined
-          ? `Response saved. ${escalation.agent_name} will pick it up on their next cron run via polling.`
-          : 'Status updated.',
+        status: deliveryStatus,
+        message: deliveryMessage,
       },
     })
   } catch (error) {

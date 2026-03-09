@@ -108,29 +108,58 @@ export function invalidateGatewayCache(): void {
 }
 
 /**
- * GLA-36: Send a message to an OpenClaw session via the gateway.
- * Uses OPENCLAW_GATEWAY_TOKEN env var for auth (falls back to DB token via gatewaySend).
+ * Invoke a tool via the OpenClaw gateway HTTP tools/invoke endpoint.
+ * Uses POST /tools/invoke (always enabled, gated by auth + tool policy).
+ * Note: sessions_send and sessions_spawn are hard-denied by default.
+ * The `cron` tool is NOT denied — use this to fire at-jobs for agent wake-up.
  */
-export async function sendToSession(sessionKey: string, message: string): Promise<void> {
+export async function gatewayInvoke(
+  tool: string,
+  args: Record<string, unknown>,
+  sessionKey = 'main'
+): Promise<unknown> {
   const baseUrl = await getGatewayUrl()
   const token = process.env.OPENCLAW_GATEWAY_TOKEN || (await getGatewayToken())
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  }
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`
-  }
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers['Authorization'] = `Bearer ${token}`
 
-  const res = await fetch(`${baseUrl}/api/sessions/send`, {
+  const res = await fetch(`${baseUrl}/tools/invoke`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ sessionKey, message }),
-    signal: AbortSignal.timeout(10_000),
+    body: JSON.stringify({ tool, args, sessionKey }),
+    signal: AbortSignal.timeout(15_000),
   })
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`sendToSession failed: ${res.status} ${text}`)
+    throw new Error(`gatewayInvoke(${tool}) failed: ${res.status} ${text}`)
   }
+
+  return res.json()
+}
+
+/**
+ * Wake an agent immediately by creating a one-shot "at" cron job that fires in 30 seconds.
+ * Used by the escalation response handler so agents spin back up without waiting
+ * for their next scheduled cron run.
+ *
+ * @param agentId    - OpenClaw agent ID (e.g. "atlas", "p-body")
+ * @param message    - The agentTurn message to inject (should include the escalation response)
+ */
+export async function wakeAgentWithResponse(agentId: string, message: string): Promise<void> {
+  // Fire 30 seconds from now
+  const fireAt = new Date(Date.now() + 30_000).toISOString()
+
+  await gatewayInvoke('cron', {
+    action: 'add',
+    job: {
+      name: `Escalation response → ${agentId}`,
+      agentId,
+      schedule: { kind: 'at', at: fireAt },
+      sessionTarget: 'isolated',
+      payload: { kind: 'agentTurn', message, timeoutSeconds: 600 },
+      delivery: { mode: 'none' },
+    },
+  })
 }
