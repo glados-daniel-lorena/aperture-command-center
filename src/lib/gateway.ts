@@ -148,9 +148,11 @@ export async function gatewayInvoke(
  * @param message    - The agentTurn message to inject (should include the escalation response)
  */
 export async function wakeAgentWithResponse(agentId: string, message: string): Promise<void> {
-  // Fire 30 seconds from now
-  const fireAt = new Date(Date.now() + 30_000).toISOString()
+  // Fire 10 seconds from now
+  const fireAt = new Date(Date.now() + 10_000).toISOString()
 
+  // Create the at-job with wakeMode: "now" so the scheduler fires immediately
+  // without waiting for the next heartbeat cycle (~20 min default)
   await gatewayInvoke('cron', {
     action: 'add',
     job: {
@@ -160,6 +162,16 @@ export async function wakeAgentWithResponse(agentId: string, message: string): P
       sessionTarget: 'isolated',
       payload: { kind: 'agentTurn', message, timeoutSeconds: 600 },
       delivery: { mode: 'none' },
+      wakeMode: 'now',
     },
+  })
+
+  // Belt-and-suspenders: also send an explicit wake event to the scheduler
+  await gatewayInvoke('cron', {
+    action: 'wake',
+    mode: 'now',
+    text: `Escalation response ready for ${agentId}`,
+  }).catch(() => {
+    // Non-fatal — job is already created with wakeMode: now
   })
 }
