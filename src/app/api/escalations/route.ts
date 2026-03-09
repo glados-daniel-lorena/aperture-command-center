@@ -31,17 +31,29 @@ function checkAgentApiKey(request: NextRequest): boolean {
  * Query params: status, priority, limit, offset
  */
 export async function GET(request: NextRequest) {
-  const auth = await requireRole(request, 'viewer')
-  if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+  // Allow agents with AGENT_API_KEY to poll their own escalations
+  const agentKey = (process.env.AGENT_API_KEY || '').trim()
+  const providedKey = (request.headers.get('x-api-key') || '').trim()
+  const agentKeyOk = agentKey && providedKey === agentKey
+
+  let workspaceIdOverride: number | undefined
+  if (!agentKeyOk) {
+    const auth = await requireRole(request, 'viewer')
+    if ('error' in auth) return NextResponse.json({ error: auth.error }, { status: auth.status })
+    workspaceIdOverride = auth.user.workspace_id ?? 1
+  }
 
   try {
     await ensureInitialized()
     const { searchParams } = new URL(request.url)
-    const workspaceId = auth.user.workspace_id ?? 1
+    const workspaceId = workspaceIdOverride ?? 1
     const status = searchParams.get('status') || 'open'
     const priority = searchParams.get('priority') || 'all'
     const limit = Math.min(parseInt(searchParams.get('limit') || '100'), 500)
     const offset = parseInt(searchParams.get('offset') || '0')
+
+    // agent_id filter — used by agents polling for their own responded escalations
+    const agentIdFilter = searchParams.get('agent_id') || null
 
     let sql = 'SELECT * FROM escalations WHERE workspace_id = ?'
     const params: any[] = [workspaceId]
@@ -54,6 +66,11 @@ export async function GET(request: NextRequest) {
     if (priority !== 'all' && VALID_PRIORITIES.includes(priority as any)) {
       sql += ' AND priority = ?'
       params.push(priority)
+    }
+
+    if (agentIdFilter) {
+      sql += ' AND agent_id = ?'
+      params.push(agentIdFilter)
     }
 
     // Sort by priority order then date

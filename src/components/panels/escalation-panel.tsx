@@ -56,7 +56,7 @@ const PRIORITY_CONFIG = {
 
 const STATUS_CONFIG = {
   open: { label: 'Open', color: 'text-amber-400', bg: 'bg-amber-500/10 border-amber-500/20' },
-  responded: { label: 'Responded', color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
+  responded: { label: 'Responded — awaiting agent poll', color: 'text-blue-400', bg: 'bg-blue-500/10 border-blue-500/20' },
   resolved: { label: 'Resolved', color: 'text-green-400', bg: 'bg-green-500/10 border-green-500/20' },
 }
 
