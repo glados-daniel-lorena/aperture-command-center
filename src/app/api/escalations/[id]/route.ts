@@ -84,11 +84,10 @@ export async function PUT(
     if (response !== undefined) {
       if (escalation.agent_id) {
         const wakeMessage =
-          `[ESCALATION RESPONSE from Daniel] ${response}\n\n` +
-          `Escalation ID: ${escalationId} | Title: "${escalation.title}"\n` +
-          `Resume your task. Mark the escalation resolved when done: ` +
-          `PATCH https://aperture-command-center-silk.vercel.app/api/escalations/${escalationId} ` +
-          `with { "status": "resolved" } and x-api-key header.`
+          `[ESCALATION RESPONSE from Daniel]\n\n` +
+          `Escalation #${escalationId}: "${escalation.title}"\n\n` +
+          `Daniel says: ${response}\n\n` +
+          `Resume your task. When done, mark escalation #${escalationId} resolved via the Command Center API (see AGENTS.md for the protocol).`
 
         try {
           await wakeAgentWithResponse(escalation.agent_id, wakeMessage, escalation.session_key)
