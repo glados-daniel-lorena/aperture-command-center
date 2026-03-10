@@ -147,31 +147,53 @@ export async function gatewayInvoke(
  * @param agentId    - OpenClaw agent ID (e.g. "atlas", "p-body")
  * @param message    - The agentTurn message to inject (should include the escalation response)
  */
-export async function wakeAgentWithResponse(agentId: string, message: string): Promise<void> {
-  // Fire 10 seconds from now
-  const fireAt = new Date(Date.now() + 10_000).toISOString()
+/**
+ * Agent channel IDs on Discord (Aperture Science Enrichment Center).
+ * Used to send wake-up messages via the gateway message tool.
+ * The cron tool is blocked on HTTP /tools/invoke; message tool is allowed.
+ */
+const AGENT_DISCORD_CHANNELS: Record<string, string> = {
+  glados:        '1479291940548776049',
+  'p-body':      '1479558658122842244',
+  atlas:         '1479558740490326160',
+  wheatley:      '1479558793183367299',
+  'cave-johnson':'1479558850884665407',
+}
 
-  // Create the at-job with wakeMode: "now" so the scheduler fires immediately
-  // without waiting for the next heartbeat cycle (~20 min default)
-  await gatewayInvoke('cron', {
-    action: 'add',
-    job: {
-      name: `Escalation response → ${agentId}`,
-      agentId,
-      schedule: { kind: 'at', at: fireAt },
-      sessionTarget: 'isolated',
-      payload: { kind: 'agentTurn', message, timeoutSeconds: 600 },
-      delivery: { mode: 'none' },
-      wakeMode: 'now',
-    },
-  })
+/**
+ * Wake an agent immediately by sending a Discord message to their channel
+ * via the gateway message tool (POST /tools/invoke with tool=message).
+ *
+ * The cron tool is blocked on HTTP /tools/invoke, but message is allowed.
+ * The agent sees the message from GLaDOS and processes it as a regular turn
+ * with the escalation response embedded.
+ *
+ * @param agentId    - OpenClaw agent ID (e.g. "atlas", "p-body")
+ * @param message    - The message to send (should include the escalation response)
+ * @param sessionKey - Agent session key (used to extract channel ID as fallback)
+ */
+export async function wakeAgentWithResponse(
+  agentId: string,
+  message: string,
+  sessionKey?: string
+): Promise<void> {
+  // Resolve channel ID: lookup table first, then parse from session key
+  let channelId = AGENT_DISCORD_CHANNELS[agentId]
+  if (!channelId && sessionKey) {
+    // session key format: agent:{id}:discord:channel:{channelId}
+    const match = sessionKey.match(/:channel:(\d+)$/)
+    if (match) channelId = match[1]
+  }
 
-  // Belt-and-suspenders: also send an explicit wake event to the scheduler
-  await gatewayInvoke('cron', {
-    action: 'wake',
-    mode: 'now',
-    text: `Escalation response ready for ${agentId}`,
-  }).catch(() => {
-    // Non-fatal — job is already created with wakeMode: now
+  if (!channelId) {
+    throw new Error(`No Discord channel ID for agent: ${agentId}`)
+  }
+
+  // Send via gateway message tool — immediate delivery, no cron delay
+  await gatewayInvoke('message', {
+    action: 'send',
+    channel: 'discord',
+    target: channelId,
+    message,
   })
 }

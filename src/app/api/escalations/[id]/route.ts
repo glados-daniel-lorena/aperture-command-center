@@ -91,7 +91,7 @@ export async function PUT(
           `with { "status": "resolved" } and x-api-key header.`
 
         try {
-          await wakeAgentWithResponse(escalation.agent_id, wakeMessage)
+          await wakeAgentWithResponse(escalation.agent_id, wakeMessage, escalation.session_key)
           deliveryStatus = 'waking'
           deliveryMessage = `${escalation.agent_name} is waking up — cron job fires in 30 seconds.`
           logger.info({ escalationId, agentId: escalation.agent_id }, 'Agent wake cron created')
